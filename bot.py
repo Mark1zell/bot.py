@@ -338,6 +338,7 @@ async def handle_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'service': state.current_service['name'],
         'user_name': user.first_name,
         'user_username': user.username,
+        'user_id': str(user.id),
         'time': datetime.now().strftime('%d.%m.%Y, %H:%M:%S'),
         'timestamp': datetime.now().isoformat(),
         'options': json.dumps(list(state.selected_options.values())),
@@ -443,7 +444,6 @@ async def my_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='my_orders')]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     
-    # Отправляем референсы отдельными сообщениями
     if order.get('reference_urls'):
         for url in order['reference_urls']:
             try:
@@ -451,7 +451,6 @@ async def my_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
     
-    # Отправляем готовые работы
     if order.get('work_files'):
         media_group = [{'type': 'photo', 'media': url} for url in order['work_files'][:10]]
         if media_group:
@@ -578,7 +577,6 @@ async def admin_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     
-    # Отправляем референсы
     if order.get('reference_urls'):
         for url in order['reference_urls']:
             try:
@@ -641,21 +639,39 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             'work_message': state.work_message
         })
         
-        if order.get('user_username'):
+        # Отправляем клиенту по user_id (более надежно)
+        print(f"DEBUG: Отправка работы для заказа #{order['id']}")
+        print(f"DEBUG: user_id = {order.get('user_id')}")
+        print(f"DEBUG: user_username = {order.get('user_username')}")
+        
+        chat_id = None
+        if order.get('user_id'):
+            chat_id = int(order['user_id'])
+        elif order.get('user_username'):
+            chat_id = f"@{order['user_username']}"
+        
+        if chat_id:
             try:
                 await context.bot.send_message(
-                    chat_id=f"@{order['user_username']}",
+                    chat_id=chat_id,
                     text=f"✅ Ваш заказ #{order['id']} готов!\n\nСообщение от Дизайнера:\n{state.work_message}"
                 )
+                print("✅ Текст отправлен")
+                
                 media_group = [{'type': 'photo', 'media': url} for url in state.work_files[:10]]
                 if media_group:
-                    await context.bot.send_media_group(chat_id=f"@{order['user_username']}", media=media_group)
+                    await context.bot.send_media_group(chat_id=chat_id, media=media_group)
+                    print("✅ Фото отправлены")
+                
                 await context.bot.send_message(
-                    chat_id=f"@{order['user_username']}",
+                    chat_id=chat_id,
                     text="⭐ Напишите ваш отзыв сюда, он автоматически опубликуется в приложении!"
                 )
+                print("✅ Запрос отзыва отправлен")
             except Exception as e:
-                print(f"Send error: {e}")
+                print(f"❌ Ошибка отправки: {e}")
+        else:
+            print("❌ Нет chat_id для отправки")
         
         state.uploading_work = False
         state.work_files = []
@@ -677,23 +693,35 @@ async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     supabase_update('orders', order_id, {'status': new_status})
     order = supabase_get_single('orders', order_id)
     
-    if order and order.get('user_username'):
+    print(f"DEBUG: Отправка уведомления для заказа #{order_id}")
+    print(f"DEBUG: user_id = {order.get('user_id') if order else None}")
+    print(f"DEBUG: user_username = {order.get('user_username') if order else None}")
+    
+    if order:
         status_text = {
             'not_started': '🔴 Ещё не приступили',
             'in_progress': '🟡 Готовится',
             'ready': '✅ Готов!'
         }.get(new_status, new_status)
         
-        try:
-            await context.bot.send_message(
-                chat_id=f"@{order['user_username']}",
-                text=f"📋 Обновление статуса заказа #{order_id}\n\n"
-                     f"Услуга: {order['service']}\n"
-                     f"Статус: {status_text}\n"
-                     f"Сумма: {order['total']}₽"
-            )
-        except Exception as e:
-            print(f"Notify error: {e}")
+        chat_id = None
+        if order.get('user_id'):
+            chat_id = int(order['user_id'])
+        elif order.get('user_username'):
+            chat_id = f"@{order['user_username']}"
+        
+        if chat_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"📋 Обновление статуса заказа #{order_id}\n\n"
+                         f"Услуга: {order['service']}\n"
+                         f"Статус: {status_text}\n"
+                         f"Сумма: {order['total']}₽"
+                )
+                print(f"✅ Уведомление отправлено: {chat_id}")
+            except Exception as e:
+                print(f"❌ Ошибка отправки: {e}")
     
     await query.answer(f"✅ {new_status}")
     await admin_order_detail(update, context)
