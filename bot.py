@@ -124,11 +124,11 @@ async def show_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # Загружаем услуги из Supabase (как на сайте)
-    services = supabase_get('services', {'order': 'order.asc', 'select': '*'})
+    # Загружаем услуги (сортировка по id)
+    services = supabase_get('services', {'order': 'id.asc'})
     
     if not services:
-        await query.edit_message_text("❌ Услуги не загружены. Проверьте подключение к базе данных.")
+        await query.edit_message_text("❌ Услуги не загружены. Проверьте подключение.")
         return
     
     keyboard = []
@@ -154,7 +154,7 @@ async def show_service_options(update: Update, context: ContextTypes.DEFAULT_TYP
     
     # Загружаем услугу и опции
     service = supabase_get_single('services', service_id)
-    options = supabase_get('service_options', {'service_id': f'eq.{service_id}', 'order': 'order.asc'})
+    options = supabase_get('service_options', {'service_id': f'eq.{service_id}', 'order': 'id.asc'})
     
     if not service:
         await query.edit_message_text(f"❌ Услуга не найдена (ID: {service_id})")
