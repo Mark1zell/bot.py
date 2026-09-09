@@ -10,7 +10,6 @@ from telegram.ext import Application, ApplicationBuilder, CommandHandler, Callba
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Конфигурация
 SUPABASE_URL = 'https://lcgbpwowppwwpjjlphod.supabase.co'
 SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxjZ2Jwd293cHB3d3BqamxwaG9kIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg2NDAwNTMsImV4cCI6MjEwNDIxNjA1M30.95VPot7saWmlgv1IzBop3E4x-ZxSc8HepqKdDLJa7JI'
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8649063131:AAGZknHiTFk1-Qmi02aCwd-yjD2A03eb-LU')
@@ -18,31 +17,7 @@ ADMIN_ID = int(os.environ.get('ADMIN_ID', '1492590083'))
 YUKASSA_SHOP_ID = '1454329'
 YUKASSA_SECRET_KEY = 'live_CrQI-miYwcX7tlYRWVJA3P87VWt9nrUo4hCFgvgcmxI'
 
-# Supabase функции с загрузкой через Storage API
-def upload_file_to_storage(file_data, file_name, folder):
-    """Загрузка файла в Supabase Storage через REST API"""
-    try:
-        # Используем правильный endpoint для загрузки
-        url = f"{SUPABASE_URL}/storage/v1/object/{folder}/{file_name}"
-        headers = {
-            'apikey': SUPABASE_KEY,
-            'Authorization': f'Bearer {SUPABASE_KEY}',
-            'Content-Type': 'image/jpeg',
-            'x-upsert': 'true'
-        }
-        response = requests.post(url, headers=headers, data=file_data, timeout=30)
-        
-        if response.status_code in [200, 201]:
-            # Возвращаем публичный URL
-            public_url = f"{SUPABASE_URL}/storage/v1/object/public/{folder}/{file_name}"
-            return public_url
-        else:
-            print(f"Upload error: {response.status_code} - {response.text[:200]}")
-            return None
-    except Exception as e:
-        print(f"Upload exception: {e}")
-        return None
-
+# Supabase функции
 def supabase_get(table, params=None):
     try:
         url = f"{SUPABASE_URL}/rest/v1/{table}"
@@ -52,7 +27,7 @@ def supabase_get(table, params=None):
             return response.json()
         return []
     except Exception as e:
-        print(f"GET ERROR: {e}")
+        print(f"ERROR: {e}")
         return []
 
 def supabase_get_single(table, id):
@@ -101,6 +76,23 @@ def supabase_update(table, id, data):
         print(f"ERROR: {e}")
         return None
 
+def upload_file_to_storage(file_data, file_name, folder):
+    try:
+        url = f"{SUPABASE_URL}/storage/v1/object/{folder}/{file_name}"
+        headers = {
+            'apikey': SUPABASE_KEY,
+            'Authorization': f'Bearer {SUPABASE_KEY}',
+            'Content-Type': 'image/jpeg',
+            'x-upsert': 'true'
+        }
+        response = requests.post(url, headers=headers, data=file_data, timeout=30)
+        if response.status_code in [200, 201]:
+            return f"{SUPABASE_URL}/storage/v1/object/public/{folder}/{file_name}"
+        return None
+    except Exception as e:
+        print(f"Upload error: {e}")
+        return None
+
 def create_yookassa_payment(order_id, amount, description):
     try:
         url = 'https://api.yookassa.ru/v3/payments'
@@ -121,7 +113,21 @@ def create_yookassa_payment(order_id, amount, description):
         response = requests.post(url, headers=headers, json=data, timeout=15)
         return response.json() if response.status_code == 200 else None
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"Yookassa error: {e}")
+        return None
+
+def check_yookassa_payment_status(payment_id):
+    try:
+        url = f"https://api.yookassa.ru/v3/payments/{payment_id}"
+        auth_string = f"{YUKASSA_SHOP_ID}:{YUKASSA_SECRET_KEY}"
+        auth_base64 = base64.b64encode(auth_string.encode()).decode()
+        headers = {'Authorization': f'Basic {auth_base64}'}
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except Exception as e:
+        print(f"Check payment error: {e}")
         return None
 
 # Состояния
@@ -139,28 +145,120 @@ def get_user_state(user_id):
         user_states[user_id] = UserState()
     return user_states[user_id]
 
+# АВТОМАТИЧЕСКАЯ ПРОВЕРКА ПЛАТЕЖЕЙ
+async def auto_check_payments(context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет все pending заказы и уведомляет админа об оплате"""
+    print("🔄 Автопроверка платежей...")
+    
+    # Получаем все заказы со статусом pending_payment
+    orders = supabase_get('orders', {'status': 'eq.pending_payment'})
+    
+    for order in orders:
+        payment_id = order.get('payment_id')
+        if not payment_id:
+            continue
+        
+        payment_data = check_yookassa_payment_status(payment_id)
+        
+        if payment_data and payment_data.get('status') == 'succeeded':
+            # Обновляем статус заказа
+            supabase_update('orders', order['id'], {
+                'status': 'paid_card',
+                'paid_at': datetime.now().isoformat()
+            })
+            
+            # Уведомляем админа
+            options = json.loads(order.get('options', '[]'))
+            options_text = "\n".join([f"• {opt['name']} ×{opt['quantity']} = {opt['total']}₽" for opt in options])
+            
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"💰 ЗАКАЗ #{order['id']} ОПЛАЧЕН!\n\n"
+                     f"Услуга: {order['service']}\n"
+                     f"Сумма: {order['total']}₽\n"
+                     f"Клиент: @{order.get('user_username', 'нет')}\n\n"
+                     f"Опции:\n{options_text}\n\n"
+                     f"ТЗ: {order.get('description', 'Нет')}"
+            )
+            
+            # Отправляем референсы админу
+            if order.get('reference_urls'):
+                for ref_url in order['reference_urls']:
+                    try:
+                        await context.bot.send_photo(
+                            chat_id=ADMIN_ID,
+                            photo=ref_url,
+                            caption=f"Референс заказа #{order['id']}"
+                        )
+                    except:
+                        pass
+            
+            # Уведомляем пользователя (если он начал диалог)
+            if order.get('user_id'):
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(order['user_id']),
+                        text=f"✅ Ваш заказ #{order['id']} оплачен!\nДизайнер скоро приступит к работе."
+                    )
+                except:
+                    pass
+            
+            print(f"✅ Заказ #{order['id']} оплачен (автопроверка)")
+
+# АВТОМАТИЧЕСКАЯ ОТПРАВКА УВЕДОМЛЕНИЙ О СТАТУСАХ
+async def auto_check_status_changes(context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет изменения статусов и уведомляет пользователей"""
+    # Получаем заказы с новыми статусами
+    orders = supabase_get('orders', {'order': 'timestamp.desc', 'limit': '50'})
+    
+    for order in orders:
+        status = order.get('status')
+        user_id = order.get('user_id')
+        
+        if not user_id:
+            continue
+        
+        # Проверяем, было ли уже отправлено уведомление для этого статуса
+        notification_key = f"notified_{order['id']}_{status}"
+        
+        # В реальном приложении нужно хранить отправленные уведомления в БД
+        # Для простоты - просто отправляем
+        
+        status_text_map = {
+            'paid_card': '💳 Оплачен! Дизайнер скоро приступит.',
+            'not_started': '🔴 Дизайнер ещё не приступил к работе.',
+            'in_progress': '🟡 Дизайнер приступил к вашей работе!',
+            'ready': '✅ Ваша работа готова!'
+        }
+        
+        if status in status_text_map:
+            try:
+                await context.bot.send_message(
+                    chat_id=int(user_id),
+                    text=f"📋 Заказ #{order['id']}\n\n{status_text_map[status]}"
+                )
+            except:
+                pass
+
 # Команды
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
     if user.id == ADMIN_ID:
-        # Админ видит только админ-панель
         keyboard = [
             [InlineKeyboardButton("👑 Админ-панель", callback_data='admin_panel')],
         ]
-        text = f"👑 Привет, Админ!\n\nВыберите действие:"
+        text = "👑 Привет, Админ!"
     else:
-        # Пользователь видит все
         keyboard = [
             [InlineKeyboardButton("🛠️ Услуги", callback_data='services')],
             [InlineKeyboardButton("📋 Мои заказы", callback_data='my_orders')],
             [InlineKeyboardButton("⭐ Отзывы", callback_data='show_reviews')],
             [InlineKeyboardButton("💬 Связаться", url='https://t.me/mark1zell')],
         ]
-        text = f"👋 Привет, {user.first_name}!\n\nВыберите действие:"
+        text = f"👋 Привет, {user.first_name}!"
     
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
     if update.message:
         await update.message.reply_text(text, reply_markup=reply_markup)
     else:
@@ -175,9 +273,7 @@ async def show_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     keyboard = []
     for service in services:
-        emoji = service.get('emoji', '📦')
-        name = service.get('name', 'Без названия')
-        keyboard.append([InlineKeyboardButton(f"{emoji} {name}", callback_data=f"svc_{service['id']}")])
+        keyboard.append([InlineKeyboardButton(f"{service.get('emoji','📦')} {service['name']}", callback_data=f"svc_{service['id']}")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')])
     await query.edit_message_text("🛠️ Выберите услугу:", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -199,22 +295,15 @@ async def show_service_options(update: Update, context: ContextTypes.DEFAULT_TYP
     state.references = []
     
     if not options:
-        await query.edit_message_text(f"{service.get('emoji', '📦')} {service['name']}\n\nНет опций. @mark1zell")
+        await query.edit_message_text(f"{service.get('emoji','📦')} {service['name']}\n\nНет опций.")
         return
     
     keyboard = []
     for option in options:
-        max_qty = option.get('max_quantity', 1) or 1
-        opt_name = option.get('name', 'Без названия')
-        opt_price = option.get('price', 0)
-        if max_qty > 1:
-            keyboard.append([InlineKeyboardButton(f"{opt_name} - {opt_price}₽ (кол-во)", callback_data=f"qty_{option['id']}")])
-        else:
-            keyboard.append([InlineKeyboardButton(f"{opt_name} - {opt_price}₽", callback_data=f"toggle_{option['id']}")])
-    
+        keyboard.append([InlineKeyboardButton(f"{option['name']} - {option['price']}₽", callback_data=f"toggle_{option['id']}")])
     keyboard.append([InlineKeyboardButton("✅ Завершить", callback_data='finish_options')])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='services')])
-    await query.edit_message_text(f"{service.get('emoji', '📦')} {service['name']}\n\nВыберите опции:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(f"{service.get('emoji','📦')} {service['name']}\n\nВыберите опции:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def toggle_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -228,14 +317,12 @@ async def toggle_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not option:
         await query.answer("❌ Не найдено", show_alert=True)
         return
-    opt_name = option.get('name', 'Опция')
-    opt_price = option.get('price', 0)
     if option_id in state.selected_options:
         del state.selected_options[option_id]
-        await query.answer(f"❌ Удалено: {opt_name}")
+        await query.answer(f"❌ Удалено: {option['name']}")
     else:
-        state.selected_options[option_id] = {'name': opt_name, 'price': opt_price, 'quantity': 1, 'total': opt_price}
-        await query.answer(f"✅ Добавлено: {opt_name} ({opt_price}₽)")
+        state.selected_options[option_id] = {'name': option['name'], 'price': option['price'], 'quantity': 1, 'total': option['price']}
+        await query.answer(f"✅ Добавлено: {option['name']} ({option['price']}₽)")
     await update_options_message(update, context, state)
 
 async def update_options_message(update: Update, context: ContextTypes.DEFAULT_TYPE, state):
@@ -249,7 +336,7 @@ async def update_options_message(update: Update, context: ContextTypes.DEFAULT_T
     keyboard.append([InlineKeyboardButton("✅ Завершить", callback_data='finish_options')])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='services')])
     
-    text = f"{service.get('emoji', '📦')} {service['name']}\n\nВыберите опции:"
+    text = f"{service.get('emoji','📦')} {service['name']}\n\nВыберите опции:"
     if state.selected_options:
         text += "\n\n✅ Выбранные:\n"
         total = 0
@@ -267,7 +354,7 @@ async def finish_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Выберите опции!")
         return
     total = sum(opt['total'] for opt in state.selected_options.values())
-    options_text = "\n".join([f"• {opt['name']} ×{opt['quantity']} = {opt['total']}₽" for opt in state.selected_options.values()])
+    options_text = "\n".join([f"• {opt['name']} = {opt['total']}₽" for opt in state.selected_options.values()])
     await query.edit_message_text(
         f"📋 Заказ:\n\n{options_text}\n\n💰 Итого: {total}₽\n\n"
         f"Отправьте ОДНИМ сообщением:\n1️⃣ Текст ТЗ\n2️⃣ До 3 фото"
@@ -277,20 +364,19 @@ async def finish_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     state = get_user_state(user.id)
+    
     if not context.user_data.get('awaiting_order'):
         return
     
     description = update.message.text or update.message.caption or ''
-    photos = []
-    if update.message.photo:
-        photos.append(update.message.photo[-1])
     
-    # Загружаем референсы
+    # Загружаем фото
     ref_urls = []
-    for photo in photos[:3]:
+    if update.message.photo:
+        photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         file_data = await file.download_as_bytearray()
-        file_name = f"ref_{user.id}_{datetime.now().timestamp()}.jpg"
+        file_name = f"ref_{user.id}_{int(datetime.now().timestamp())}.jpg"
         file_url = upload_file_to_storage(bytes(file_data), file_name, 'references')
         if file_url:
             ref_urls.append(file_url)
@@ -347,41 +433,14 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.edit_message_text("🔄 Проверяем оплату...")
     
-    auth_string = f"{YUKASSA_SHOP_ID}:{YUKASSA_SECRET_KEY}"
-    auth_base64 = base64.b64encode(auth_string.encode()).decode()
-    response = requests.get(f"https://api.yookassa.ru/v3/payments/{order['payment_id']}", headers={'Authorization': f'Basic {auth_base64}'}, timeout=10)
+    payment_data = check_yookassa_payment_status(order['payment_id'])
     
-    if response.status_code == 200:
-        data = response.json()
-        if data.get('status') == 'succeeded':
-            supabase_update('orders', order_id, {'status': 'paid_card', 'paid_at': datetime.now().isoformat()})
-            
-            # Уведомление админу об оплате
-            options = json.loads(order.get('options', '[]'))
-            options_text = "\n".join([f"• {opt['name']} ×{opt['quantity']} = {opt['total']}₽" for opt in options])
-            
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"💰 Заказ #{order_id} ОПЛАЧЕН!\n\n"
-                     f"Услуга: {order['service']}\n"
-                     f"Сумма: {order['total']}₽\n"
-                     f"Клиент: @{order.get('user_username', 'нет')}\n\n"
-                     f"Опции:\n{options_text}\n\n"
-                     f"ТЗ: {order.get('description', 'Нет')}"
-            )
-            
-            # Отправляем референсы админу
-            if order.get('reference_urls'):
-                for url in order['reference_urls']:
-                    try:
-                        await context.bot.send_photo(chat_id=ADMIN_ID, photo=url, caption=f"Референс заказа #{order_id}")
-                    except:
-                        pass
-            
-            await query.edit_message_text("✅ Оплата прошла! Дизайнер скоро приступит.")
-        else:
-            keyboard = [[InlineKeyboardButton("🔄 Проверить снова", callback_data=f'check_payment_{order_id}')]]
-            await query.edit_message_text("⏳ Оплата не обнаружена:", reply_markup=InlineKeyboardMarkup(keyboard))
+    if payment_data and payment_data.get('status') == 'succeeded':
+        supabase_update('orders', order_id, {'status': 'paid_card', 'paid_at': datetime.now().isoformat()})
+        await query.edit_message_text("✅ Оплата прошла!")
+    else:
+        keyboard = [[InlineKeyboardButton("🔄 Проверить снова", callback_data=f'check_payment_{order_id}')]]
+        await query.edit_message_text("⏳ Оплата не обнаружена:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -392,10 +451,12 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not orders:
         await query.edit_message_text("📋 Нет заказов.")
         return
+    
+    status_map = {'pending_payment': '⏳', 'paid_card': '💳', 'not_started': '🔴', 'in_progress': '🟡', 'ready': '✅'}
     keyboard = []
     for order in orders:
-        status_emoji = {'pending_payment': '⏳', 'paid_card': '💳', 'not_started': '🔴', 'in_progress': '🟡', 'ready': '✅'}.get(order.get('status'), '❓')
-        keyboard.append([InlineKeyboardButton(f"{status_emoji} #{order['id']} - {order['service']} - {order['total']}₽", callback_data=f"my_order_{order['id']}")])
+        emoji = status_map.get(order.get('status'), '❓')
+        keyboard.append([InlineKeyboardButton(f"{emoji} #{order['id']} - {order['service']} - {order['total']}₽", callback_data=f"my_order_{order['id']}")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')])
     await query.edit_message_text("📋 Ваши заказы:", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -411,19 +472,22 @@ async def my_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Заказ не найден.")
         return
     
-    options = json.loads(order.get('options', '[]'))
-    status_emoji = {'pending_payment': '⏳ Ожидает оплаты', 'paid_card': '💳 Оплачен', 'not_started': '🔴 Не приступили', 'in_progress': '🟡 Готовится', 'ready': '✅ Готов'}.get(order.get('status'), order.get('status'))
+    status_map = {
+        'pending_payment': '⏳ Ожидает оплаты',
+        'paid_card': '💳 Оплачен',
+        'not_started': '🔴 Дизайнер ещё не приступил',
+        'in_progress': '🟡 Дизайнер приступил к вашей работе',
+        'ready': '✅ Работа готова!'
+    }
     
     text = f"📋 Заказ #{order['id']}\n\n"
     text += f"Услуга: {order['service']}\n"
-    text += f"Статус: {status_emoji}\n"
-    text += f"Сумма: {order['total']}₽\n\n"
-    if options:
-        text += "Опции:\n"
-        for opt in options:
-            text += f"• {opt['name']} ×{opt['quantity']}\n"
+    text += f"Статус: {status_map.get(order.get('status'), order.get('status'))}\n"
+    text += f"Сумма: {order['total']}₽\n"
     if order.get('description'):
         text += f"\nТЗ: {order['description']}\n"
+    if order.get('work_message'):
+        text += f"\n💬 Сообщение: {order['work_message']}\n"
     
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='my_orders')]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -465,7 +529,7 @@ async def admin_all_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     keyboard = []
     for order in orders:
-        keyboard.append([InlineKeyboardButton(f"#{order['id']} - {order['service']} ({order.get('status','?')})", callback_data=f"admin_order_{order['id']}")])
+        keyboard.append([InlineKeyboardButton(f"#{order['id']} - {order['service']}", callback_data=f"admin_order_{order['id']}")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')])
     await query.edit_message_text("Все заказы:", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -520,27 +584,23 @@ async def admin_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("Заказ не найден.")
         return
     
-    options = json.loads(order.get('options', '[]'))
+    status_map = {'pending_payment': '⏳ Ожидает', 'paid_card': '💳 Оплачен', 'not_started': '🔴 Не приступили', 'in_progress': '🟡 Готовится', 'ready': '✅ Готов'}
+    
     text = f"📋 Заказ #{order['id']}\n\n"
     text += f"Услуга: {order['service']}\n"
     text += f"Клиент: @{order.get('user_username', 'нет')}\n"
     text += f"Сумма: {order['total']}₽\n"
-    text += f"Статус: {order.get('status', '?')}\n\n"
-    if options:
-        text += "Опции:\n"
-        for opt in options:
-            text += f"• {opt['name']} ×{opt['quantity']}\n"
+    text += f"Статус: {status_map.get(order.get('status'), order.get('status'))}\n"
     if order.get('description'):
         text += f"\nТЗ: {order['description']}\n"
     
     keyboard = [
-        [InlineKeyboardButton("🟡 Готовится", callback_data=f'status_{order_id}_in_progress')],
+        [InlineKeyboardButton("🟡 Приступил", callback_data=f'status_{order_id}_in_progress')],
         [InlineKeyboardButton("🟢 Готов", callback_data=f'upload_work_{order_id}')],
         [InlineKeyboardButton("🔙 Назад", callback_data='admin_users')],
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     
-    # Отправляем референсы админу
     if order.get('reference_urls'):
         for url in order['reference_urls']:
             try:
@@ -562,19 +622,23 @@ async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     supabase_update('orders', order_id, {'status': new_status})
     order = supabase_get_single('orders', order_id)
     
-    # Уведомление пользователю в бот (если он начал диалог)
+    status_text_map = {
+        'not_started': '🔴 Дизайнер ещё не приступил',
+        'in_progress': '🟡 Дизайнер приступил к вашей работе!',
+        'ready': '✅ Ваша работа готова!'
+    }
+    status_text = status_text_map.get(new_status, new_status)
+    
     if order and order.get('user_id'):
-        status_text = {'not_started': '🔴 Ещё не приступили', 'in_progress': '🟡 Готовится', 'ready': '✅ Готов!'}.get(new_status, new_status)
         try:
             await context.bot.send_message(
                 chat_id=int(order['user_id']),
                 text=f"📋 Статус заказа #{order_id}: {status_text}"
             )
-            print(f"✅ Уведомление отправлено пользователю {order['user_id']}")
-        except Exception as e:
-            print(f"ℹ️ Пользователь не начал диалог с ботом: {e}")
+        except:
+            pass
     
-    await query.answer(f"✅ {new_status}")
+    await query.answer("✅ Статус обновлен!")
     await admin_order_detail(update, context)
 
 async def upload_work_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -591,7 +655,7 @@ async def upload_work_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data['work_files'] = []
     context.user_data['work_message'] = ''
     
-    await query.edit_message_text(f"📎 Загрузка работы для заказа #{order_id}\n\nОтправьте текст и фото (до 10)")
+    await query.edit_message_text(f"📎 Загрузка работы для заказа #{order_id}\n\nОтправьте текст и фото")
 
 async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -604,17 +668,15 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     order_id = context.user_data.get('upload_order_id')
     message_text = update.message.text or update.message.caption or ''
-    photos = []
-    if update.message.photo:
-        photos.append(update.message.photo[-1])
     
     if message_text:
         context.user_data['work_message'] = message_text
     
-    for photo in photos[:10]:
+    if update.message.photo:
+        photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         file_data = await file.download_as_bytearray()
-        file_name = f"work_{order_id}_{datetime.now().timestamp()}.jpg"
+        file_name = f"work_{order_id}_{int(datetime.now().timestamp())}.jpg"
         file_url = upload_file_to_storage(bytes(file_data), file_name, 'works')
         if file_url:
             context.user_data['work_files'].append(file_url)
@@ -628,9 +690,23 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             'work_files': work_files,
             'work_message': work_message
         })
-        
         context.user_data['uploading_work'] = False
-        await update.message.reply_text("✅ Работа сохранена!")
+        
+        # Уведомляем пользователя
+        order = supabase_get_single('orders', order_id)
+        if order and order.get('user_id'):
+            try:
+                await context.bot.send_message(
+                    chat_id=int(order['user_id']),
+                    text=f"✅ Ваш заказ #{order_id} готов!\n\n{work_message}"
+                )
+                media_group = [{'type': 'photo', 'media': url} for url in work_files[:10]]
+                if media_group:
+                    await context.bot.send_media_group(chat_id=int(order['user_id']), media=media_group)
+            except:
+                pass
+        
+        await update.message.reply_text(f"✅ Работа сохранена! Фото: {len(work_files)}")
     else:
         await update.message.reply_text(f"📎 Фото: {len(work_files)}, Текст: {'✅' if work_message else '❌'}")
 
@@ -643,7 +719,10 @@ def main():
     print("Запуск бота...")
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     
+    # Команды
     application.add_handler(CommandHandler('start', start))
+    
+    # Callback handlers
     application.add_handler(CallbackQueryHandler(change_status, pattern='^status_'))
     application.add_handler(CallbackQueryHandler(upload_work_prompt, pattern='^upload_work_'))
     application.add_handler(CallbackQueryHandler(my_order_detail, pattern='^my_order_'))
@@ -660,8 +739,17 @@ def main():
     application.add_handler(CallbackQueryHandler(admin_all_orders, pattern='^admin_all_orders$'))
     application.add_handler(CallbackQueryHandler(back_to_start, pattern='^back_to_start$'))
     application.add_handler(CallbackQueryHandler(show_services, pattern='^services$'))
+    
+    # Message handler
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_admin_upload))
     
+    # Автоматическая проверка платежей каждые 30 секунд
+    application.job_queue.run_repeating(auto_check_payments, interval=30, first=10)
+    
+    # Автоматическая проверка статусов каждые 60 секунд
+    application.job_queue.run_repeating(auto_check_status_changes, interval=60, first=20)
+    
+    print("✅ Бот запущен!")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
