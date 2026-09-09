@@ -673,4 +673,94 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     order_id = context.user_data.get('upload_order_id')
     message_text = update.message.text or update.message.caption or ''
-    photos
+    photos = []
+    if update.message.photo:
+        photos.append(update.message.photo[-1])
+    
+    if message_text:
+        context.user_data['work_message'] = message_text
+    
+    for photo in photos[:10]:
+        file = await context.bot.get_file(photo.file_id)
+        file_data = await file.download_as_bytearray()
+        file_name = f"work_{order_id}_{datetime.now().timestamp()}.jpg"
+        file_url = upload_file(bytes(file_data), file_name, 'works')
+        if file_url:
+            context.user_data['work_files'].append(file_url)
+    
+    work_files = context.user_data.get('work_files', [])
+    work_message = context.user_data.get('work_message', '')
+    
+    if work_files and work_message:
+        supabase_update('orders', order_id, {
+            'status': 'ready',
+            'work_files': work_files,
+            'work_message': work_message
+        })
+        
+        context.user_data['uploading_work'] = False
+        context.user_data['work_files'] = []
+        context.user_data['work_message'] = ''
+        
+        await update.message.reply_text("✅ Работа сохранена!")
+    else:
+        await update.message.reply_text(f"📎 Получено: {len(work_files)} фото\nТекст: {'✅' if work_message else '❌'}\nОтправьте еще")
+
+async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id != ADMIN_ID:
+        return
+    parts = query.data.split('_')
+    if len(parts) < 3:
+        return
+    order_id = int(parts[1])
+    new_status = parts[2]
+    supabase_update('orders', order_id, {'status': new_status})
+    await query.answer(f"✅ {new_status}")
+    await admin_order_detail(update, context)
+
+async def back_to_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await start(update, context)
+
+def main():
+    print("DEBUG: Запуск бота...")
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    # Команды
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('services', cmd_services))
+    application.add_handler(CommandHandler('myorders', cmd_myorders))
+    application.add_handler(CommandHandler('reviews', cmd_reviews))
+    
+    # Callback handlers
+    application.add_handler(CallbackQueryHandler(set_qty, pattern='^setqty_'))
+    application.add_handler(CallbackQueryHandler(show_qty, pattern='^qty_'))
+    application.add_handler(CallbackQueryHandler(toggle_option, pattern='^toggle_'))
+    application.add_handler(CallbackQueryHandler(check_payment, pattern='^check_payment_'))
+    application.add_handler(CallbackQueryHandler(cancel_order, pattern='^cancel_order_'))
+    application.add_handler(CallbackQueryHandler(change_status, pattern='^status_'))
+    application.add_handler(CallbackQueryHandler(upload_work_prompt, pattern='^upload_work_'))
+    application.add_handler(CallbackQueryHandler(my_order_detail, pattern='^my_order_'))
+    application.add_handler(CallbackQueryHandler(admin_order_detail, pattern='^admin_order_'))
+    application.add_handler(CallbackQueryHandler(admin_user_orders, pattern='^admin_user_'))
+    application.add_handler(CallbackQueryHandler(show_service_options, pattern='^svc_'))
+    application.add_handler(CallbackQueryHandler(finish_options, pattern='^finish_options$'))
+    application.add_handler(CallbackQueryHandler(show_reviews, pattern='^show_reviews$'))
+    application.add_handler(CallbackQueryHandler(my_orders, pattern='^my_orders$'))
+    application.add_handler(CallbackQueryHandler(admin_panel, pattern='^admin_panel$'))
+    application.add_handler(CallbackQueryHandler(admin_users, pattern='^admin_users$'))
+    application.add_handler(CallbackQueryHandler(admin_all_orders, pattern='^admin_all_orders$'))
+    application.add_handler(CallbackQueryHandler(back_to_start, pattern='^back_to_start$'))
+    application.add_handler(CallbackQueryHandler(show_services, pattern='^services$'))
+    
+    # Message handler
+    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_admin_upload))
+    
+    print("DEBUG: Бот запущен!")
+    application.run_polling(drop_pending_updates=True)
+
+if __name__ == '__main__':
+    main()
