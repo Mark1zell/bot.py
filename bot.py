@@ -26,14 +26,13 @@ def supabase_get(table, params=None):
             'Content-Type': 'application/json'
         }
         response = requests.get(url, headers=headers, params=params, timeout=15)
-        print(f"DEBUG GET {table}: {response.status_code}")
         if response.status_code == 200:
             return response.json()
         else:
-            print(f"ERROR: {response.text[:200]}")
+            print(f"ERROR GET {table}: {response.status_code} - {response.text[:200]}")
             return []
     except Exception as e:
-        print(f"EXCEPTION: {e}")
+        print(f"EXCEPTION GET {table}: {e}")
         return []
 
 def supabase_get_single(table, id):
@@ -45,13 +44,12 @@ def supabase_get_single(table, id):
             'Content-Type': 'application/json'
         }
         response = requests.get(url, headers=headers, timeout=15)
-        print(f"DEBUG GET SINGLE {table}/{id}: {response.status_code}")
         if response.status_code == 200:
             data = response.json()
             return data[0] if data else None
         return None
     except Exception as e:
-        print(f"EXCEPTION: {e}")
+        print(f"EXCEPTION GET SINGLE: {e}")
         return None
 
 def supabase_insert(table, data):
@@ -64,13 +62,12 @@ def supabase_insert(table, data):
             'Prefer': 'return=representation'
         }
         response = requests.post(url, headers=headers, json=data, timeout=15)
-        print(f"DEBUG INSERT {table}: {response.status_code}")
         if response.status_code in [200, 201]:
             data = response.json()
             return data[0] if data else None
         return None
     except Exception as e:
-        print(f"EXCEPTION: {e}")
+        print(f"EXCEPTION INSERT: {e}")
         return None
 
 def supabase_update(table, id, data):
@@ -83,10 +80,9 @@ def supabase_update(table, id, data):
             'Prefer': 'return=representation'
         }
         response = requests.patch(url, headers=headers, json=data, timeout=15)
-        print(f"DEBUG UPDATE {table}/{id}: {response.status_code}")
         return response.json() if response.ok else None
     except Exception as e:
-        print(f"EXCEPTION: {e}")
+        print(f"EXCEPTION UPDATE: {e}")
         return None
 
 # Временное хранилище
@@ -128,94 +124,113 @@ async def show_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    services = supabase_get('services', {'order': 'order.asc'})
-    print(f"DEBUG: services = {services}")
+    # Загружаем услуги из Supabase (как на сайте)
+    services = supabase_get('services', {'order': 'order.asc', 'select': '*'})
     
     if not services:
-        await query.edit_message_text("Услуги пока не добавлены или ошибка подключения.")
+        await query.edit_message_text("❌ Услуги не загружены. Проверьте подключение к базе данных.")
         return
     
     keyboard = []
     for service in services:
-        keyboard.append([InlineKeyboardButton(
-            f"{service.get('emoji', '📦')} {service['name']}", 
-            callback_data=f"service_{service['id']}"
-        )])
+        emoji = service.get('emoji', '📦')
+        name = service.get('name', 'Без названия')
+        keyboard.append([InlineKeyboardButton(f"{emoji} {name}", callback_data=f"service_{service['id']}")])
     
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text("Выберите услугу:", reply_markup=reply_markup)
+    await query.edit_message_text("🛠️ Выберите услугу:", reply_markup=reply_markup)
 
 async def show_service_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    data = query.data
-    parts = data.split('_')
+    parts = query.data.split('_')
+    if len(parts) < 2:
+        await query.edit_message_text("Ошибка формата")
+        return
+    
     service_id = int(parts[1])
     
+    # Загружаем услугу и опции
     service = supabase_get_single('services', service_id)
     options = supabase_get('service_options', {'service_id': f'eq.{service_id}', 'order': 'order.asc'})
     
-    print(f"DEBUG: service = {service}")
-    print(f"DEBUG: options = {options}")
-    
     if not service:
-        await query.edit_message_text(f"Услуга не найдена (ID: {service_id})")
+        await query.edit_message_text(f"❌ Услуга не найдена (ID: {service_id})")
         return
     
     state = get_user_state(query.from_user.id)
     state.current_service = service
     state.selected_options = {}
     
+    emoji = service.get('emoji', '📦')
+    name = service.get('name', 'Без названия')
+    description = service.get('description', '')
+    
     if not options:
-        await query.edit_message_text(f"{service['name']}\n\nНет опций. Свяжитесь: @mark1zell")
+        await query.edit_message_text(f"{emoji} {name}\n\n{description}\n\n❌ Нет опций. Свяжитесь: @mark1zell")
         return
     
     keyboard = []
     for option in options:
+        opt_name = option.get('name', 'Без названия')
+        opt_price = option.get('price', 0)
         max_qty = option.get('max_quantity', 1) or 1
+        
         if max_qty > 1:
             keyboard.append([InlineKeyboardButton(
-                f"{option['name']} - {option['price']}₽ (кол-во)", 
+                f"{opt_name} - {opt_price}₽ (кол-во)", 
                 callback_data=f"qty_{option['id']}"
             )])
         else:
             keyboard.append([InlineKeyboardButton(
-                f"{option['name']} - {option['price']}₽", 
+                f"{opt_name} - {opt_price}₽", 
                 callback_data=f"toggle_{option['id']}"
             )])
     
-    keyboard.append([InlineKeyboardButton("✅ Завершить", callback_data='finish_options')])
+    keyboard.append([InlineKeyboardButton("✅ Завершить выбор", callback_data='finish_options')])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='services')])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(f"{service.get('emoji', '📦')} {service['name']}\n\nВыберите опции:", reply_markup=reply_markup)
+    text = f"{emoji} {name}\n"
+    if description:
+        text += f"\n{description}\n"
+    text += "\nВыберите опции:"
+    
+    await query.edit_message_text(text, reply_markup=reply_markup)
 
 async def toggle_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    data = query.data
-    parts = data.split('_')
-    option_id = int(parts[1])
+    parts = query.data.split('_')
+    if len(parts) < 2:
+        return
     
+    option_id = int(parts[1])
     state = get_user_state(query.from_user.id)
+    
     option = supabase_get_single('service_options', option_id)
     
     if not option:
         await query.answer("❌ Опция не найдена")
         return
     
+    opt_name = option.get('name', 'Опция')
+    opt_price = option.get('price', 0)
+    
     if option_id in state.selected_options:
         del state.selected_options[option_id]
+        await query.answer(f"❌ Убрано: {opt_name}")
     else:
         state.selected_options[option_id] = {
-            'name': option['name'],
-            'price': option['price'],
+            'name': opt_name,
+            'price': opt_price,
             'quantity': 1,
-            'total': option['price']
+            'total': opt_price
         }
+        await query.answer(f"✅ Добавлено: {opt_name}")
     
     await show_service_options(update, context)
 
@@ -223,8 +238,10 @@ async def show_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    data = query.data
-    parts = data.split('_')
+    parts = query.data.split('_')
+    if len(parts) < 2:
+        return
+    
     option_id = int(parts[1])
     context.user_data['qty_option_id'] = option_id
     
@@ -250,16 +267,17 @@ async def set_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    data = query.data
-    parts = data.split('_')
-    qty = int(parts[1])
+    parts = query.data.split('_')
+    if len(parts) < 2:
+        return
     
+    qty = int(parts[1])
     option_id = context.user_data.get('qty_option_id')
     state = get_user_state(query.from_user.id)
     
     option = supabase_get_single('service_options', option_id)
     if option:
-        price = option['price']
+        price = option.get('price', 0)
         discount_min = option.get('discount_min_quantity')
         discount_price = option.get('discount_price')
         
@@ -268,11 +286,13 @@ async def set_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
             final_price = discount_price
         
         state.selected_options[option_id] = {
-            'name': option['name'],
+            'name': option.get('name', 'Опция'),
             'price': final_price,
             'quantity': qty,
             'total': final_price * qty
         }
+        
+        await query.answer(f"✅ {option['name']} ×{qty}")
     
     await show_service_options(update, context)
 
@@ -283,14 +303,14 @@ async def finish_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = get_user_state(query.from_user.id)
     
     if not state.selected_options:
-        await query.edit_message_text("Выберите хотя бы одну опцию!")
+        await query.edit_message_text("❌ Выберите хотя бы одну опцию!")
         return
     
     total = sum(opt['total'] for opt in state.selected_options.values())
     options_text = "\n".join([f"• {opt['name']} ×{opt['quantity']} = {opt['total']}₽" for opt in state.selected_options.values()])
     
     await query.edit_message_text(
-        f"📋 Ваш заказ:\n\n{options_text}\n\nИтого: {total}₽\n\nОтправьте описание ТЗ:"
+        f"📋 Ваш заказ:\n\n{options_text}\n\n💰 Итого: {total}₽\n\nОтправьте описание ТЗ:"
     )
     
     context.user_data['awaiting_description'] = True
@@ -332,7 +352,7 @@ async def handle_description(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=reply_markup
         )
     else:
-        await update.message.reply_text("❌ Ошибка при создании заказа")
+        await update.message.reply_text("❌ Ошибка при создании заказа. Попробуйте позже.")
 
 async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -348,7 +368,7 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
     
     if not orders:
-        await query.edit_message_text("У вас пока нет заказов.")
+        await query.edit_message_text("📋 У вас пока нет заказов.")
         return
     
     text = "📋 Ваши заказы:\n\n"
