@@ -391,15 +391,74 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     user_identifier = user.username or user.first_name or str(user.id)
     orders = supabase_get('orders', {'or': f'(user_username.eq.{user_identifier},user_name.eq.{user_identifier})', 'order': 'timestamp.desc'})
+    
     if not orders:
-        await query.edit_message_text("📋 Нет заказов.")
+        await query.edit_message_text("📋 У вас пока нет заказов.")
         return
-    text = "📋 Ваши заказы:\n\n"
+    
+    keyboard = []
     for order in orders:
         status_emoji = {'pending_payment': '⏳', 'paid_card': '💳', 'not_started': '🔴', 'in_progress': '🟡', 'ready': '✅'}.get(order.get('status'), '❓')
-        text += f"{status_emoji} #{order['id']} - {order['service']} - {order['total']}₽\n"
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')]]
+        keyboard.append([InlineKeyboardButton(
+            f"{status_emoji} #{order['id']} - {order['service']} - {order['total']}₽",
+            callback_data=f"my_order_{order['id']}"
+        )])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')])
+    await query.edit_message_text("📋 Ваши заказы:\nНажмите для деталей:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def my_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split('_')
+    if len(parts) < 3:
+        return
+    order_id = int(parts[2])
+    order = supabase_get_single('orders', order_id)
+    
+    if not order:
+        await query.edit_message_text("Заказ не найден.")
+        return
+    
+    options = json.loads(order.get('options', '[]'))
+    status_emoji = {'pending_payment': '⏳ Ожидает оплаты', 'paid_card': '💳 Оплачен', 'not_started': '🔴 Ещё не приступили', 'in_progress': '🟡 Готовится', 'ready': '✅ Готов'}.get(order.get('status'), order.get('status'))
+    
+    text = f"📋 Заказ #{order['id']}\n\n"
+    text += f"🛠️ Услуга: {order['service']}\n"
+    text += f"📊 Статус: {status_emoji}\n"
+    text += f"💰 Сумма: {order['total']}₽\n"
+    text += f"📅 Дата: {order.get('time', 'Не указана')}\n\n"
+    
+    if options:
+        text += "📦 Опции:\n"
+        for opt in options:
+            text += f"• {opt['name']} ×{opt['quantity']} = {opt['total']}₽\n"
+    
+    if order.get('description'):
+        text += f"\n📝 Ваше ТЗ:\n{order['description']}\n"
+    
+    if order.get('work_message'):
+        text += f"\n💬 Сообщение от дизайнера:\n{order['work_message']}\n"
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='my_orders')]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    # Отправляем референсы отдельными сообщениями
+    if order.get('reference_urls'):
+        for url in order['reference_urls']:
+            try:
+                await context.bot.send_photo(chat_id=query.from_user.id, photo=url, caption="📎 Референс")
+            except:
+                pass
+    
+    # Отправляем готовые работы
+    if order.get('work_files'):
+        media_group = [{'type': 'photo', 'media': url} for url in order['work_files'][:10]]
+        if media_group:
+            try:
+                await context.bot.send_media_group(chat_id=query.from_user.id, media=media_group)
+            except:
+                pass
 
 async def show_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -428,6 +487,22 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')],
     ]
     await query.edit_message_text("👑 Админ-панель:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def admin_all_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id != ADMIN_ID:
+        return
+    orders = supabase_get('orders', {'order': 'timestamp.desc', 'limit': '20'})
+    if not orders:
+        await query.edit_message_text("Нет заказов.")
+        return
+    keyboard = []
+    for order in orders:
+        status = order.get('status', '?')
+        keyboard.append([InlineKeyboardButton(f"#{order['id']} - {order['service']} ({status})", callback_data=f"admin_order_{order['id']}")])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')])
+    await query.edit_message_text("Все заказы:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -502,6 +577,14 @@ async def admin_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("🔙 Назад", callback_data='admin_users')],
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    # Отправляем референсы
+    if order.get('reference_urls'):
+        for url in order['reference_urls']:
+            try:
+                await context.bot.send_photo(chat_id=query.from_user.id, photo=url, caption=f"Референс заказа #{order['id']}")
+            except:
+                pass
 
 async def upload_work_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -593,12 +676,25 @@ async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_status = parts[2]
     supabase_update('orders', order_id, {'status': new_status})
     order = supabase_get_single('orders', order_id)
+    
     if order and order.get('user_username'):
-        status_text = {'not_started': '🔴 Ещё не приступили', 'in_progress': '🟡 Готовится', 'ready': '✅ Готов!'}.get(new_status, new_status)
+        status_text = {
+            'not_started': '🔴 Ещё не приступили',
+            'in_progress': '🟡 Готовится',
+            'ready': '✅ Готов!'
+        }.get(new_status, new_status)
+        
         try:
-            await context.bot.send_message(chat_id=f"@{order['user_username']}", text=f"📋 Заказ #{order_id}\nСтатус: {status_text}")
-        except:
-            pass
+            await context.bot.send_message(
+                chat_id=f"@{order['user_username']}",
+                text=f"📋 Обновление статуса заказа #{order_id}\n\n"
+                     f"Услуга: {order['service']}\n"
+                     f"Статус: {status_text}\n"
+                     f"Сумма: {order['total']}₽"
+            )
+        except Exception as e:
+            print(f"Notify error: {e}")
+    
     await query.answer(f"✅ {new_status}")
     await admin_order_detail(update, context)
 
@@ -617,6 +713,7 @@ def main():
     application.add_handler(CallbackQueryHandler(check_payment, pattern='^check_payment_'))
     application.add_handler(CallbackQueryHandler(change_status, pattern='^status_'))
     application.add_handler(CallbackQueryHandler(upload_work_prompt, pattern='^upload_work_'))
+    application.add_handler(CallbackQueryHandler(my_order_detail, pattern='^my_order_'))
     application.add_handler(CallbackQueryHandler(admin_order_detail, pattern='^admin_order_'))
     application.add_handler(CallbackQueryHandler(admin_user_orders, pattern='^admin_user_'))
     application.add_handler(CallbackQueryHandler(show_service_options, pattern='^svc_'))
@@ -625,6 +722,7 @@ def main():
     application.add_handler(CallbackQueryHandler(my_orders, pattern='^my_orders$'))
     application.add_handler(CallbackQueryHandler(admin_panel, pattern='^admin_panel$'))
     application.add_handler(CallbackQueryHandler(admin_users, pattern='^admin_users$'))
+    application.add_handler(CallbackQueryHandler(admin_all_orders, pattern='^admin_all_orders$'))
     application.add_handler(CallbackQueryHandler(back_to_start, pattern='^back_to_start$'))
     application.add_handler(CallbackQueryHandler(show_services, pattern='^services$'))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_admin_upload))
