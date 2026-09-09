@@ -391,7 +391,7 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user = query.from_user
     user_identifier = user.username or user.first_name or str(user.id)
-    orders = supabase_get('orders', {'or': f'(user_username.eq.{user_identifier},user_name.eq.{user_identifier})', 'order': 'timestamp.desc'})
+    orders = supabase_get('orders', {'or': f'(user_username.eq.{user_identifier},user_name.eq.{user_identifier},user_id.eq.{str(user.id)})', 'order': 'timestamp.desc'})
     
     if not orders:
         await query.edit_message_text("📋 У вас пока нет заказов.")
@@ -639,11 +639,7 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             'work_message': state.work_message
         })
         
-        # Отправляем клиенту по user_id (более надежно)
-        print(f"DEBUG: Отправка работы для заказа #{order['id']}")
-        print(f"DEBUG: user_id = {order.get('user_id')}")
-        print(f"DEBUG: user_username = {order.get('user_username')}")
-        
+        # Пробуем отправить в бот
         chat_id = None
         if order.get('user_id'):
             chat_id = int(order['user_id'])
@@ -656,27 +652,22 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
                     chat_id=chat_id,
                     text=f"✅ Ваш заказ #{order['id']} готов!\n\nСообщение от Дизайнера:\n{state.work_message}"
                 )
-                print("✅ Текст отправлен")
-                
                 media_group = [{'type': 'photo', 'media': url} for url in state.work_files[:10]]
                 if media_group:
                     await context.bot.send_media_group(chat_id=chat_id, media=media_group)
-                    print("✅ Фото отправлены")
-                
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text="⭐ Напишите ваш отзыв сюда, он автоматически опубликуется в приложении!"
+                    text="⭐ Напишите ваш отзыв в приложении!"
                 )
-                print("✅ Запрос отзыва отправлен")
+                print(f"✅ Отправлено в бот: {chat_id}")
             except Exception as e:
-                print(f"❌ Ошибка отправки: {e}")
-        else:
-            print("❌ Нет chat_id для отправки")
+                print(f"ℹ️ Не удалось отправить в бот (пользователь не начал диалог): {e}")
+                print(f"✅ Работа сохранена в приложении")
         
         state.uploading_work = False
         state.work_files = []
         state.work_message = ''
-        await update.message.reply_text("✅ Работа отправлена клиенту!")
+        await update.message.reply_text("✅ Работа сохранена! Пользователь увидит в приложении.")
     else:
         await update.message.reply_text(f"📎 Получено: {len(state.work_files)} фото\nТекст: {'✅' if state.work_message else '❌'}\nОтправьте еще или /done для завершения")
 
@@ -692,10 +683,6 @@ async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_status = parts[2]
     supabase_update('orders', order_id, {'status': new_status})
     order = supabase_get_single('orders', order_id)
-    
-    print(f"DEBUG: Отправка уведомления для заказа #{order_id}")
-    print(f"DEBUG: user_id = {order.get('user_id') if order else None}")
-    print(f"DEBUG: user_username = {order.get('user_username') if order else None}")
     
     if order:
         status_text = {
@@ -721,9 +708,10 @@ async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 print(f"✅ Уведомление отправлено: {chat_id}")
             except Exception as e:
-                print(f"❌ Ошибка отправки: {e}")
+                print(f"ℹ️ Не удалось отправить в бот: {e}")
+                print(f"✅ Статус обновлен в приложении (realtime)")
     
-    await query.answer(f"✅ {new_status}")
+    await query.answer(f"✅ Статус обновлен!")
     await admin_order_detail(update, context)
 
 async def back_to_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
