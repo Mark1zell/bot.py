@@ -124,6 +124,11 @@ def get_admin_state(user_id):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
+    # Проверяем, есть ли параметр auto (автоматическая подписка)
+    if context.args and context.args[0] == 'auto':
+        await update.message.reply_text("✅ Вы подписаны на уведомления!")
+        return
+    
     if user.id == ADMIN_ID:
         keyboard = [[InlineKeyboardButton("👑 Админ-панель", callback_data='admin_panel')]]
         text = "👑 Привет, Админ!"
@@ -343,14 +348,19 @@ async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     status_text = status_text_map.get(new_status, new_status)
     
+    # Пробуем отправить уведомление
+    sent = False
+    
     if order and order.get('user_id'):
         try:
             await context.bot.send_message(
                 chat_id=int(order['user_id']),
                 text=f"📋 Статус заказа #{order_id}: {status_text}"
             )
-        except:
-            pass
+            sent = True
+            print(f"✅ Уведомление отправлено пользователю {order['user_id']}")
+        except Exception as e:
+            print(f"ℹ️ Пользователь не начал диалог с ботом: {e}")
     
     if new_status == 'ready':
         allow_review(order)
@@ -473,6 +483,7 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             state.work_files.append(file_url)
     
     if state.work_files and state.work_message:
+        # Сохраняем в БД
         supabase_update('orders', order['id'], {
             'status': 'ready',
             'work_files': state.work_files,
@@ -481,36 +492,76 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         allow_review(order)
         
-        chat_id = None
-        if order.get('user_id'):
-            chat_id = int(order['user_id'])
-        elif order.get('user_username'):
-            chat_id = f"@{order['user_username']}"
+        # Пробуем отправить пользователю
+        print(f"DEBUG: Отправка пользователю")
+        print(f"DEBUG: user_id = {order.get('user_id')}")
+        print(f"DEBUG: user_username = {order.get('user_username')}")
         
-        if chat_id:
+        sent = False
+        chat_id = None
+        
+        # Пробуем по user_id
+        if order.get('user_id'):
             try:
+                chat_id = int(order['user_id'])
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"✅ Ваш заказ #{order['id']} готов!\n\n"
                          f"Сообщение от Дизайнера:\n{state.work_message}"
                 )
+                sent = True
+                print(f"✅ Отправлено по user_id: {chat_id}")
+            except Exception as e:
+                print(f"❌ Ошибка отправки по user_id: {e}")
+        
+        # Если не получилось - пробуем по username
+        if not sent and order.get('user_username'):
+            try:
+                chat_id = f"@{order['user_username']}"
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"✅ Ваш заказ #{order['id']} готов!\n\n"
+                         f"Сообщение от Дизайнера:\n{state.work_message}"
+                )
+                sent = True
+                print(f"✅ Отправлено по username: {chat_id}")
+            except Exception as e:
+                print(f"❌ Ошибка отправки по username: {e}")
+        
+        # Отправляем фото если сообщение доставлено
+        if sent and state.work_files:
+            try:
                 media_group = [{'type': 'photo', 'media': url} for url in state.work_files[:10]]
                 if media_group:
                     await context.bot.send_media_group(chat_id=chat_id, media=media_group)
-                
+                print("✅ Фото отправлены")
+            except Exception as e:
+                print(f"❌ Ошибка отправки фото: {e}")
+        
+        # Отправляем кнопку для отзыва
+        if sent:
+            try:
                 keyboard = [[InlineKeyboardButton("⭐ Оставить отзыв", callback_data=f'review_{order["id"]}')]]
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text="Понравилась работа? Оставьте отзыв!",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
+                print("✅ Кнопка отзыва отправлена")
             except Exception as e:
-                print(f"Send error: {e}")
+                print(f"❌ Ошибка отправки кнопки: {e}")
         
         state.uploading_work = False
         state.work_files = []
         state.work_message = ''
-        await update.message.reply_text("✅ Работа отправлена!")
+        
+        if sent:
+            await update.message.reply_text("✅ Работа отправлена клиенту!")
+        else:
+            await update.message.reply_text(
+                "✅ Работа сохранена в приложении!\n"
+                "⚠️ Не удалось отправить уведомление в бот (пользователь не начал диалог)"
+            )
     else:
         await update.message.reply_text(f"📎 Фото: {len(state.work_files)}, Текст: {'✅' if state.work_message else '❌'}")
 
