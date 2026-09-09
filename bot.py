@@ -4,7 +4,7 @@ import json
 import requests
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -433,7 +433,7 @@ async def back_to_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
 def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
     
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CallbackQueryHandler(show_services, pattern='^services$'))
@@ -450,7 +450,7 @@ def main():
     application.add_handler(CallbackQueryHandler(back_to_start, pattern='^back_to_start$'))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_description))
     
-    application.run_polling()
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
