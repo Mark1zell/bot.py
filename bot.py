@@ -7,6 +7,7 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
+# Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -18,36 +19,6 @@ ADMIN_ID = int(os.environ.get('ADMIN_ID', '1492590083'))
 YUKASSA_SHOP_ID = '1454329'
 YUKASSA_SECRET_KEY = 'live_CrQI-miYwcX7tlYRWVJA3P87VWt9nrUo4hCFgvgcmxI'
 
-# Хранилище состояний
-user_states = {}
-admin_states = {}
-
-class UserState:
-    def __init__(self):
-        self.current_service = None
-        self.selected_options = {}
-        self.description = ''
-        self.references = []
-        self.current_order_id = None
-
-class AdminState:
-    def __init__(self):
-        self.selected_user = None
-        self.selected_order = None
-        self.uploading_work = False
-        self.work_files = []
-        self.work_message = ''
-
-def get_user_state(user_id):
-    if user_id not in user_states:
-        user_states[user_id] = UserState()
-    return user_states[user_id]
-
-def get_admin_state(user_id):
-    if user_id not in admin_states:
-        admin_states[user_id] = AdminState()
-    return admin_states[user_id]
-
 # Supabase функции
 def supabase_get(table, params=None):
     try:
@@ -58,7 +29,7 @@ def supabase_get(table, params=None):
             return response.json()
         return []
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"GET ERROR: {e}")
         return []
 
 def supabase_get_single(table, id):
@@ -71,7 +42,7 @@ def supabase_get_single(table, id):
             return data[0] if data else None
         return None
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"GET SINGLE ERROR: {e}")
         return None
 
 def supabase_insert(table, data):
@@ -89,7 +60,7 @@ def supabase_insert(table, data):
             return data[0] if data else None
         return None
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"INSERT ERROR: {e}")
         return None
 
 def supabase_update(table, id, data):
@@ -104,7 +75,7 @@ def supabase_update(table, id, data):
         response = requests.patch(url, headers=headers, json=data, timeout=15)
         return response.json() if response.ok else None
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"UPDATE ERROR: {e}")
         return None
 
 def upload_file(file_data, file_name, folder):
@@ -120,7 +91,7 @@ def upload_file(file_data, file_name, folder):
             return url
         return None
     except Exception as e:
-        print(f"Upload error: {e}")
+        print(f"UPLOAD ERROR: {e}")
         return None
 
 def create_yookassa_payment(order_id, amount, description):
@@ -143,10 +114,39 @@ def create_yookassa_payment(order_id, amount, description):
         response = requests.post(url, headers=headers, json=data, timeout=15)
         return response.json() if response.status_code == 200 else None
     except Exception as e:
-        print(f"Yookassa error: {e}")
+        print(f"YOOKASSA ERROR: {e}")
         return None
 
-# Команды пользователя
+# Состояния
+user_states = {}
+admin_states = {}
+
+class UserState:
+    def __init__(self):
+        self.current_service = None
+        self.selected_options = {}
+        self.description = ''
+        self.references = []
+        self.current_order_id = None
+
+class AdminState:
+    def __init__(self):
+        self.selected_order = None
+        self.uploading_work = False
+        self.work_files = []
+        self.work_message = ''
+
+def get_user_state(user_id):
+    if user_id not in user_states:
+        user_states[user_id] = UserState()
+    return user_states[user_id]
+
+def get_admin_state(user_id):
+    if user_id not in admin_states:
+        admin_states[user_id] = AdminState()
+    return admin_states[user_id]
+
+# Пользовательские команды
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     keyboard = [
@@ -172,14 +172,19 @@ async def show_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     keyboard = []
     for service in services:
-        keyboard.append([InlineKeyboardButton(f"{service.get('emoji', '📦')} {service['name']}", callback_data=f"svc_{service['id']}")])
+        emoji = service.get('emoji', '📦')
+        name = service.get('name', 'Без названия')
+        keyboard.append([InlineKeyboardButton(f"{emoji} {name}", callback_data=f"svc_{service['id']}")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')])
     await query.edit_message_text("🛠️ Выберите услугу:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_service_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    service_id = int(query.data.split('_')[1])
+    parts = query.data.split('_')
+    if len(parts) < 2:
+        return
+    service_id = int(parts[1])
     service = supabase_get_single('services', service_id)
     if not service:
         await query.edit_message_text("❌ Услуга не найдена")
@@ -190,36 +195,47 @@ async def show_service_options(update: Update, context: ContextTypes.DEFAULT_TYP
     state.selected_options = {}
     state.references = []
     
+    if not options:
+        await query.edit_message_text(f"{service.get('emoji', '📦')} {service['name']}\n\nНет опций. @mark1zell")
+        return
+    
     keyboard = []
     for option in options:
         max_qty = option.get('max_quantity', 1) or 1
+        opt_name = option.get('name', 'Без названия')
+        opt_price = option.get('price', 0)
         if max_qty > 1:
-            keyboard.append([InlineKeyboardButton(f"{option['name']} - {option['price']}₽ (кол-во)", callback_data=f"qty_{option['id']}")])
+            keyboard.append([InlineKeyboardButton(f"{opt_name} - {opt_price}₽ (кол-во)", callback_data=f"qty_{option['id']}")])
         else:
-            keyboard.append([InlineKeyboardButton(f"{option['name']} - {option['price']}₽", callback_data=f"toggle_{option['id']}")])
-    keyboard.append([InlineKeyboardButton("✅ Завершить", callback_data='finish_options')])
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='services')])
+            keyboard.append([InlineKeyboardButton(f"{opt_name} - {opt_price}₽", callback_data=f"toggle_{option['id']}")])
     
-    text = f"{service.get('emoji', '📦')} {service['name']}\n\nВыберите опции:"
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard.append([InlineKeyboardButton("✅ Завершить выбор", callback_data='finish_options')])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='services')])
+    await query.edit_message_text(f"{service.get('emoji', '📦')} {service['name']}\n\nВыберите опции:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def toggle_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    option_id = int(query.data.split('_')[1])
+    parts = query.data.split('_')
+    if len(parts) < 2:
+        await query.answer()
+        return
+    option_id = int(parts[1])
     state = get_user_state(query.from_user.id)
     option = supabase_get_single('service_options', option_id)
     if not option:
-        await query.answer("❌ Не найдено", show_alert=True)
+        await query.answer("❌ Опция не найдена", show_alert=True)
         return
+    opt_name = option.get('name', 'Опция')
+    opt_price = option.get('price', 0)
     if option_id in state.selected_options:
         del state.selected_options[option_id]
-        await query.answer(f"❌ Удалено: {option['name']}")
+        await query.answer(f"❌ Удалено: {opt_name} ({opt_price}₽)")
     else:
-        state.selected_options[option_id] = {'name': option['name'], 'price': option['price'], 'quantity': 1, 'total': option['price']}
-        await query.answer(f"✅ Добавлено: {option['name']}")
-    await update_options(update, context, state)
+        state.selected_options[option_id] = {'name': opt_name, 'price': opt_price, 'quantity': 1, 'total': opt_price}
+        await query.answer(f"✅ Добавлено: {opt_name} ({opt_price}₽)")
+    await update_options_message(update, context, state)
 
-async def update_options(update: Update, context: ContextTypes.DEFAULT_TYPE, state):
+async def update_options_message(update: Update, context: ContextTypes.DEFAULT_TYPE, state):
     query = update.callback_query
     service = state.current_service
     options = supabase_get('service_options', {'service_id': f'eq.{service["id"]}', 'order': 'id.asc'})
@@ -231,7 +247,7 @@ async def update_options(update: Update, context: ContextTypes.DEFAULT_TYPE, sta
             keyboard.append([InlineKeyboardButton(f"{prefix}{option['name']} - {option['price']}₽ (кол-во)", callback_data=f"qty_{option['id']}")])
         else:
             keyboard.append([InlineKeyboardButton(f"{prefix}{option['name']} - {option['price']}₽", callback_data=f"toggle_{option['id']}")])
-    keyboard.append([InlineKeyboardButton("✅ Завершить", callback_data='finish_options')])
+    keyboard.append([InlineKeyboardButton("✅ Завершить выбор", callback_data='finish_options')])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='services')])
     
     text = f"{service.get('emoji', '📦')} {service['name']}\n\nВыберите опции:"
@@ -239,7 +255,7 @@ async def update_options(update: Update, context: ContextTypes.DEFAULT_TYPE, sta
         text += "\n\n✅ Выбранные:\n"
         total = 0
         for opt in state.selected_options.values():
-            text += f"• {opt['name']} = {opt['total']}₽\n"
+            text += f"• {opt['name']} ×{opt['quantity']} = {opt['total']}₽\n"
             total += opt['total']
         text += f"\n💰 Итого: {total}₽"
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -247,7 +263,10 @@ async def update_options(update: Update, context: ContextTypes.DEFAULT_TYPE, sta
 async def show_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    option_id = int(query.data.split('_')[1])
+    parts = query.data.split('_')
+    if len(parts) < 2:
+        return
+    option_id = int(parts[1])
     context.user_data['qty_option_id'] = option_id
     option = supabase_get_single('service_options', option_id)
     if not option:
@@ -262,28 +281,31 @@ async def show_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    qty = int(query.data.split('_')[1])
+    parts = query.data.split('_')
+    if len(parts) < 2:
+        return
+    qty = int(parts[1])
     option_id = context.user_data.get('qty_option_id')
     state = get_user_state(query.from_user.id)
     option = supabase_get_single('service_options', option_id)
     if option:
         state.selected_options[option_id] = {'name': option['name'], 'price': option['price'], 'quantity': qty, 'total': option['price'] * qty}
-    await update_options(update, context, state)
+    await update_options_message(update, context, state)
 
 async def finish_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     state = get_user_state(query.from_user.id)
     if not state.selected_options:
-        await query.edit_message_text("❌ Выберите опции!")
+        await query.edit_message_text("❌ Выберите хотя бы одну опцию!")
         return
     total = sum(opt['total'] for opt in state.selected_options.values())
     options_text = "\n".join([f"• {opt['name']} ×{opt['quantity']} = {opt['total']}₽" for opt in state.selected_options.values()])
     await query.edit_message_text(
-        f"📋 Заказ:\n\n{options_text}\n\n💰 Итого: {total}₽\n\n"
+        f"📋 Ваш заказ:\n\n{options_text}\n\n💰 Итого: {total}₽\n\n"
         f"<b>Отправьте ОДНИМ сообщением:</b>\n"
-        f"1️⃣ Текст ТЗ\n"
-        f"2️⃣ До 3 фото-референсов",
+        f"1️⃣ Текст ТЗ (опишите что нужно)\n"
+        f"2️⃣ Прикрепите до 3 фото-референсов",
         parse_mode='HTML'
     )
     context.user_data['awaiting_order'] = True
@@ -324,9 +346,7 @@ async def handle_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'reference_urls': ref_urls,
         'status': 'pending_payment',
         'payment_id': None,
-        'paid_at': None,
-        'work_files': [],
-        'work_message': ''
+        'paid_at': None
     }
     
     result = supabase_insert('orders', order_data)
@@ -340,11 +360,16 @@ async def handle_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ Заказ #{order_id} создан!\n💰 Сумма: {total}₽", reply_markup=InlineKeyboardMarkup(keyboard))
         else:
             await update.message.reply_text(f"✅ Заказ #{order_id} создан!\nСвяжитесь: @mark1zell")
+    else:
+        await update.message.reply_text("❌ Ошибка при создании заказа.")
 
 async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    order_id = int(query.data.split('_')[2])
+    parts = query.data.split('_')
+    if len(parts) < 3:
+        return
+    order_id = int(parts[2])
     order = supabase_get_single('orders', order_id)
     if not order or not order.get('payment_id'):
         await query.edit_message_text("❌ Платеж не найден")
@@ -386,8 +411,7 @@ async def show_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "⭐ Отзывы:\n\n"
     for review in reviews:
         stars = '★' * review.get('stars', 5) + '☆' * (5 - review.get('stars', 5))
-        text += f"{stars} {review.get('author_name', 'Аноним')}\n"
-        text += f"{review.get('text', '')}\n\n"
+        text += f"{stars} {review.get('author_name', 'Аноним')}\n{review.get('text', '')}\n\n"
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -396,10 +420,11 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id != ADMIN_ID:
+        await query.edit_message_text("Нет доступа.")
         return
     keyboard = [
         [InlineKeyboardButton("👥 Пользователи с заказами", callback_data='admin_users')],
-        [InlineKeyboardButton("📋 Все заказы", callback_data='admin_orders')],
+        [InlineKeyboardButton("📋 Все заказы", callback_data='admin_all_orders')],
         [InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')],
     ]
     await query.edit_message_text("👑 Админ-панель:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -409,9 +434,9 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     if query.from_user.id != ADMIN_ID:
         return
-    orders = supabase_get('orders', {'status': 'in.(paid_card,not_started,in_progress)', 'order': 'timestamp.desc'})
+    orders = supabase_get('orders', {'order': 'timestamp.desc'})
     if not orders:
-        await query.edit_message_text("Нет активных заказов.")
+        await query.edit_message_text("Нет заказов.")
         return
     users = {}
     for order in orders:
@@ -419,19 +444,18 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if uname not in users:
             users[uname] = []
         users[uname].append(order)
-    
     keyboard = []
     for uname, user_orders in users.items():
         keyboard.append([InlineKeyboardButton(f"👤 @{uname} ({len(user_orders)} зак.)", callback_data=f"admin_user_{uname}")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')])
-    await query.edit_message_text("👥 Пользователи с заказами:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text("👥 Пользователи:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_user_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id != ADMIN_ID:
         return
-    uname = query.data.split('admin_user_')[1]
+    uname = query.data.replace('admin_user_', '')
     orders = supabase_get('orders', {'or': f'(user_username.eq.{uname},user_name.eq.{uname})', 'order': 'timestamp.desc'})
     if not orders:
         await query.edit_message_text("Заказы не найдены.")
@@ -448,12 +472,14 @@ async def admin_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     if query.from_user.id != ADMIN_ID:
         return
-    order_id = int(query.data.split('_')[2])
+    parts = query.data.split('_')
+    if len(parts) < 3:
+        return
+    order_id = int(parts[2])
     order = supabase_get_single('orders', order_id)
     if not order:
         await query.edit_message_text("Заказ не найден.")
         return
-    
     state = get_admin_state(query.from_user.id)
     state.selected_order = order
     
@@ -469,8 +495,6 @@ async def admin_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
             text += f"• {opt['name']} ×{opt['quantity']}\n"
     if order.get('description'):
         text += f"\nТЗ: {order['description']}\n"
-    if order.get('reference_urls'):
-        text += f"\nРеференсов: {len(order['reference_urls'])} шт.\n"
     
     keyboard = [
         [InlineKeyboardButton("🟡 Готовится", callback_data=f'status_{order_id}_in_progress')],
@@ -484,23 +508,29 @@ async def upload_work_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     if query.from_user.id != ADMIN_ID:
         return
-    order_id = int(query.data.split('_')[2])
+    parts = query.data.split('_')
+    if len(parts) < 3:
+        return
+    order_id = int(parts[2])
     state = get_admin_state(query.from_user.id)
     state.selected_order = supabase_get_single('orders', order_id)
     state.uploading_work = True
     state.work_files = []
+    state.work_message = ''
     
     await query.edit_message_text(
         f"📎 Загрузка работы для заказа #{order_id}\n\n"
-        f"Отправьте:\n"
-        f"1️⃣ Текст сообщения для клиента\n"
-        f"2️⃣ До 10 фото готовой работы"
+        f"Отправьте сообщение и фото (до 10 шт.)\n"
+        f"Формат: текст + фото одним сообщением"
     )
 
 async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    state = get_admin_state(user.id)
+    if user.id != ADMIN_ID:
+        await handle_order(update, context)
+        return
     
+    state = get_admin_state(user.id)
     if not state.uploading_work or not state.selected_order:
         return
     
@@ -522,27 +552,21 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             state.work_files.append(file_url)
     
     if state.work_files and state.work_message:
-        # Сохраняем в Supabase
         supabase_update('orders', order['id'], {
             'status': 'ready',
             'work_files': state.work_files,
             'work_message': state.work_message
         })
         
-        # Отправляем клиенту
         if order.get('user_username'):
             try:
-                media_group = []
-                for url in state.work_files:
-                    media_group.append({'type': 'photo', 'media': url})
-                
                 await context.bot.send_message(
                     chat_id=f"@{order['user_username']}",
                     text=f"✅ Ваш заказ #{order['id']} готов!\n\nСообщение от Дизайнера:\n{state.work_message}"
                 )
+                media_group = [{'type': 'photo', 'media': url} for url in state.work_files[:10]]
                 if media_group:
-                    await context.bot.send_media_group(chat_id=f"@{order['user_username']}", media=media_group[:10])
-                
+                    await context.bot.send_media_group(chat_id=f"@{order['user_username']}", media=media_group)
                 await context.bot.send_message(
                     chat_id=f"@{order['user_username']}",
                     text="⭐ Напишите ваш отзыв сюда, он автоматически опубликуется в приложении!"
@@ -555,7 +579,7 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         state.work_message = ''
         await update.message.reply_text("✅ Работа отправлена клиенту!")
     else:
-        await update.message.reply_text(f"📎 Принято: {len(state.work_files)} фото. Отправьте текст сообщения и фото (или /done для завершения)")
+        await update.message.reply_text(f"📎 Получено: {len(state.work_files)} фото\nТекст: {'✅' if state.work_message else '❌'}\nОтправьте еще или /done для завершения")
 
 async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -563,10 +587,11 @@ async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.from_user.id != ADMIN_ID:
         return
     parts = query.data.split('_')
+    if len(parts) < 3:
+        return
     order_id = int(parts[1])
     new_status = parts[2]
     supabase_update('orders', order_id, {'status': new_status})
-    
     order = supabase_get_single('orders', order_id)
     if order and order.get('user_username'):
         status_text = {'not_started': '🔴 Ещё не приступили', 'in_progress': '🟡 Готовится', 'ready': '✅ Готов!'}.get(new_status, new_status)
@@ -600,10 +625,9 @@ def main():
     application.add_handler(CallbackQueryHandler(my_orders, pattern='^my_orders$'))
     application.add_handler(CallbackQueryHandler(admin_panel, pattern='^admin_panel$'))
     application.add_handler(CallbackQueryHandler(admin_users, pattern='^admin_users$'))
-    application.add_handler(CallbackQueryHandler(admin_orders, pattern='^admin_orders$'))
     application.add_handler(CallbackQueryHandler(back_to_start, pattern='^back_to_start$'))
     application.add_handler(CallbackQueryHandler(show_services, pattern='^services$'))
-    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_admin_upload if ADMIN_ID else handle_order))
+    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_admin_upload))
     
     application.run_polling(drop_pending_updates=True)
 
