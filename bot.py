@@ -3,6 +3,7 @@ import logging
 import json
 import requests
 import base64
+import asyncio
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
@@ -68,7 +69,6 @@ def supabase_update(table, id, data):
         return None
 
 def supabase_update_by_username(table, username, data):
-    """Обновляет все записи по username"""
     try:
         url = f"{SUPABASE_URL}/rest/v1/{table}?user_username=eq.{username}"
         headers = {
@@ -78,10 +78,9 @@ def supabase_update_by_username(table, username, data):
             'Prefer': 'return=representation'
         }
         response = requests.patch(url, headers=headers, json=data, timeout=15)
-        print(f"DEBUG: Update by username status = {response.status_code}")
         return response.json() if response.ok else None
     except Exception as e:
-        print(f"UPDATE BY USERNAME ERROR: {e}")
+        print(f"ERROR: {e}")
         return None
 
 def upload_file(file_data, file_name, folder):
@@ -118,6 +117,9 @@ class AdminState:
         self.uploading_work = False
         self.work_files = []
         self.work_message = ''
+        self.pending_photos = []
+        self.pending_message = ''
+        self.last_media_group_id = None
 
 def get_user_state(user_id):
     if user_id not in user_states:
@@ -133,7 +135,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     print(f"DEBUG: /start от {user.id} (@{user.username})")
     
-    # СОХРАНЯЕМ user_id во все заказы пользователя
     if user.username:
         supabase_update_by_username('orders', user.username, {'user_id': str(user.id)})
         print(f"✅ user_id {user.id} сохранен для @{user.username}")
@@ -346,7 +347,6 @@ async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     sent = False
     
-    # Пробуем по user_id
     if order and order.get('user_id'):
         try:
             await context.bot.send_message(
@@ -358,14 +358,12 @@ async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"❌ Ошибка user_id: {e}")
     
-    # Пробуем по username
     if not sent and order and order.get('user_username'):
         try:
             await context.bot.send_message(
                 chat_id=f"@{order.get('user_username')}",
                 text=f"📋 Статус заказа #{order_id}: {status_text}"
             )
-            sent = True
             print(f"✅ Отправлено username: @{order.get('user_username')}")
         except Exception as e:
             print(f"❌ Ошибка username: {e}")
@@ -391,6 +389,9 @@ async def upload_work_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
     state.uploading_work = True
     state.work_files = []
     state.work_message = ''
+    state.pending_photos = []
+    state.pending_message = ''
+    state.last_media_group_id = None
     
     await query.edit_message_text(
         f"📎 Загрузка работы для заказа #{order_id}\n\n"
@@ -479,20 +480,46 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     order = state.selected_order
     message_text = update.message.text or update.message.caption or ''
-    photos = []
-    if update.message.photo:
-        photos.append(update.message.photo[-1])
     
+    # Сохраняем текст
     if message_text:
-        state.work_message = message_text
+        state.pending_message = message_text
     
-    for photo in photos[:10]:
-        file = await context.bot.get_file(photo.file_id)
-        file_data = await file.download_as_bytearray()
-        file_name = f"work_{order.get('id', '0')}_{datetime.now().timestamp()}.jpg"
-        file_url = upload_file(bytes(file_data), file_name, 'works')
-        if file_url:
-            state.work_files.append(file_url)
+    # Сохраняем фото
+    if update.message.photo:
+        photo = update.message.photo[-1]
+        # Проверяем, не дублируется ли фото
+        if photo.file_id not in [p.file_id for p in state.pending_photos]:
+            state.pending_photos.append(photo)
+            print(f"📸 Получено фото: {len(state.pending_photos)}")
+    
+    # Если это media_group - ждем еще фото
+    if update.message.media_group_id:
+        # Сообщаем, но не завершаем
+        if len(state.pending_photos) < 10:
+            await update.message.reply_text(f"📸 Получено: {len(state.pending_photos)} фото")
+            return
+    
+    # Если нет media_group или это последнее фото - обрабатываем
+    # Ждем 1 секунду для сбора остальных фото
+    await asyncio.sleep(1)
+    
+    # Загружаем все фото
+    for photo in state.pending_photos[:10]:
+        try:
+            file = await context.bot.get_file(photo.file_id)
+            file_data = await file.download_as_bytearray()
+            file_name = f"work_{order.get('id', '0')}_{datetime.now().timestamp()}.jpg"
+            file_url = upload_file(bytes(file_data), file_name, 'works')
+            if file_url:
+                state.work_files.append(file_url)
+                print(f"✅ Фото загружено")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки: {e}")
+    
+    state.work_message = state.pending_message
+    state.pending_photos = []
+    state.pending_message = ''
     
     if state.work_files and state.work_message:
         supabase_update('orders', order.get('id'), {
@@ -506,7 +533,6 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         sent = False
         chat_id = None
         
-        # Пробуем user_id
         if order.get('user_id'):
             try:
                 chat_id = int(order.get('user_id'))
@@ -519,7 +545,6 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             except Exception as e:
                 print(f"❌ Ошибка user_id: {e}")
         
-        # Пробуем username
         if not sent and order.get('user_username'):
             try:
                 chat_id = f"@{order.get('user_username')}"
@@ -557,11 +582,14 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         state.work_message = ''
         
         if sent:
-            await update.message.reply_text("✅ Работа отправлена клиенту!")
+            await update.message.reply_text(f"✅ Работа отправлена! Фото: {len(state.work_files)}")
         else:
             await update.message.reply_text("✅ Работа сохранена! (пользователь не подписан)")
     else:
-        await update.message.reply_text(f"📎 Фото: {len(state.work_files)}, Текст: {'✅' if state.work_message else '❌'}")
+        await update.message.reply_text(
+            f"📎 Фото: {len(state.work_files)}, Текст: {'✅' if state.work_message else '❌'}\n"
+            f"Отправьте текст и фото одним сообщением"
+        )
 
 async def handle_review_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
