@@ -1,10 +1,16 @@
 import os
 import logging
 import json
+import asyncio
+import sys
 import requests
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+
+# Для совместимости с Python 3.12+
+if sys.version_info >= (3, 12):
+    asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
 # Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
