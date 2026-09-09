@@ -1,7 +1,6 @@
 import os
 import logging
 import json
-import asyncio
 import requests
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -451,8 +450,10 @@ def main():
     application.add_handler(CallbackQueryHandler(back_to_start, pattern='^back_to_start$'))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_description))
     
-    # Используем asyncio.run для Python 3.14
-    asyncio.run(application.run_polling(allowed_updates=Update.ALL_TYPES))
+    # Запуск через updater (работает на Python 3.14)
+    updater = application.updater
+    updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    updater.idle()
 
 if __name__ == '__main__':
     main()
