@@ -1,0 +1,16 @@
+services:
+  - type: worker
+    name: mark1z-bot
+    env: python
+    runtime: python3.11
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python bot.py"
+    envVars:
+      - key: BOT_TOKEN
+        value: "8649063131:AAGZknHiTFk1-Qmi02aCwd-yjD2A03eb-LU"
+      - key: SUPABASE_URL
+        value: "https://lcgbpwowppwwpjjlphod.supabase.co"
+      - key: SUPABASE_KEY
+        value: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxjZ2Jwd293cHB3d3BqamxwaG9kIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg2NDAwNTMsImV4cCI6MjEwNDIxNjA1M30.95VPot7saWmlgv1IzBop3E4x-ZxSc8HepqKdDLJa7JI"
+      - key: ADMIN_ID
+        value: "1492590083"
