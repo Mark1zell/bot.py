@@ -29,10 +29,10 @@ def supabase_get(table, params=None):
         if response.status_code == 200:
             return response.json()
         else:
-            print(f"ERROR GET {table}: {response.status_code} - {response.text[:200]}")
+            print(f"ERROR GET {table}: {response.status_code}")
             return []
     except Exception as e:
-        print(f"EXCEPTION GET {table}: {e}")
+        print(f"EXCEPTION: {e}")
         return []
 
 def supabase_get_single(table, id):
@@ -49,7 +49,7 @@ def supabase_get_single(table, id):
             return data[0] if data else None
         return None
     except Exception as e:
-        print(f"EXCEPTION GET SINGLE: {e}")
+        print(f"EXCEPTION: {e}")
         return None
 
 def supabase_insert(table, data):
@@ -67,7 +67,7 @@ def supabase_insert(table, data):
             return data[0] if data else None
         return None
     except Exception as e:
-        print(f"EXCEPTION INSERT: {e}")
+        print(f"EXCEPTION: {e}")
         return None
 
 def supabase_update(table, id, data):
@@ -82,7 +82,7 @@ def supabase_update(table, id, data):
         response = requests.patch(url, headers=headers, json=data, timeout=15)
         return response.json() if response.ok else None
     except Exception as e:
-        print(f"EXCEPTION UPDATE: {e}")
+        print(f"EXCEPTION: {e}")
         return None
 
 # Временное хранилище
@@ -124,18 +124,24 @@ async def show_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # Загружаем услуги (сортировка по id)
-    services = supabase_get('services', {'order': 'id.asc'})
+    # Загружаем услуги
+    services = supabase_get('services', {'select': 'id,emoji,name', 'order': 'id.asc'})
+    
+    print(f"DEBUG: Services loaded: {len(services)}")
+    for s in services:
+        print(f"DEBUG: Service ID={s['id']}, Name={s['name']}")
     
     if not services:
-        await query.edit_message_text("❌ Услуги не загружены. Проверьте подключение.")
+        await query.edit_message_text("❌ Услуги не загружены.")
         return
     
     keyboard = []
     for service in services:
         emoji = service.get('emoji', '📦')
         name = service.get('name', 'Без названия')
-        keyboard.append([InlineKeyboardButton(f"{emoji} {name}", callback_data=f"service_{service['id']}")])
+        sid = service['id']
+        # Используем service_ для услуг
+        keyboard.append([InlineKeyboardButton(f"{emoji} {name}", callback_data=f"svc_{sid}")])
     
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')])
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -145,20 +151,27 @@ async def show_service_options(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
+    # Используем svc_ вместо service_
     parts = query.data.split('_')
     if len(parts) < 2:
         await query.edit_message_text("Ошибка формата")
         return
     
     service_id = int(parts[1])
+    print(f"DEBUG: Loading options for service_id={service_id}")
     
-    # Загружаем услугу и опции
+    # Загружаем услугу
     service = supabase_get_single('services', service_id)
-    options = supabase_get('service_options', {'service_id': f'eq.{service_id}', 'order': 'id.asc'})
     
     if not service:
         await query.edit_message_text(f"❌ Услуга не найдена (ID: {service_id})")
         return
+    
+    # Загружаем опции для этой услуги
+    options = supabase_get('service_options', {'service_id': f'eq.{service_id}', 'select': 'id,service_id,name,price,max_quantity,min_quantity,discount_min_quantity,discount_price', 'order': 'id.asc'})
+    
+    print(f"DEBUG: Service: {service['name']}")
+    print(f"DEBUG: Options count: {len(options)}")
     
     state = get_user_state(query.from_user.id)
     state.current_service = service
@@ -202,19 +215,20 @@ async def show_service_options(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def toggle_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     
     parts = query.data.split('_')
     if len(parts) < 2:
+        await query.answer()
         return
     
     option_id = int(parts[1])
     state = get_user_state(query.from_user.id)
     
+    # Загружаем опцию
     option = supabase_get_single('service_options', option_id)
     
     if not option:
-        await query.answer("❌ Опция не найдена")
+        await query.answer("❌ Опция не найдена", show_alert=True)
         return
     
     opt_name = option.get('name', 'Опция')
@@ -222,7 +236,7 @@ async def toggle_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if option_id in state.selected_options:
         del state.selected_options[option_id]
-        await query.answer(f"❌ Убрано: {opt_name}")
+        await query.answer(f"❌ Удалено: {opt_name} ({opt_price}₽)")
     else:
         state.selected_options[option_id] = {
             'name': opt_name,
@@ -230,9 +244,63 @@ async def toggle_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'quantity': 1,
             'total': opt_price
         }
-        await query.answer(f"✅ Добавлено: {opt_name}")
+        await query.answer(f"✅ Добавлено: {opt_name} ({opt_price}₽)")
     
-    await show_service_options(update, context)
+    # Обновляем сообщение
+    await update_service_options_message(update, context, state)
+
+async def update_service_options_message(update: Update, context: ContextTypes.DEFAULT_TYPE, state):
+    query = update.callback_query
+    service = state.current_service
+    
+    if not service:
+        return
+    
+    service_id = service['id']
+    options = supabase_get('service_options', {'service_id': f'eq.{service_id}', 'order': 'id.asc'})
+    
+    emoji = service.get('emoji', '📦')
+    name = service.get('name', 'Без названия')
+    description = service.get('description', '')
+    
+    keyboard = []
+    for option in options:
+        opt_name = option.get('name', 'Без названия')
+        opt_price = option.get('price', 0)
+        max_qty = option.get('max_quantity', 1) or 1
+        
+        is_selected = option['id'] in state.selected_options
+        prefix = "✅ " if is_selected else ""
+        
+        if max_qty > 1:
+            keyboard.append([InlineKeyboardButton(
+                f"{prefix}{opt_name} - {opt_price}₽ (кол-во)", 
+                callback_data=f"qty_{option['id']}"
+            )])
+        else:
+            keyboard.append([InlineKeyboardButton(
+                f"{prefix}{opt_name} - {opt_price}₽", 
+                callback_data=f"toggle_{option['id']}"
+            )])
+    
+    keyboard.append([InlineKeyboardButton("✅ Завершить выбор", callback_data='finish_options')])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='services')])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    text = f"{emoji} {name}\n"
+    if description:
+        text += f"\n{description}\n"
+    text += "\nВыберите опции:"
+    
+    if state.selected_options:
+        text += "\n\n✅ Выбранные опции:\n"
+        total = 0
+        for opt in state.selected_options.values():
+            text += f"• {opt['name']} ×{opt['quantity']} = {opt['total']}₽\n"
+            total += opt['total']
+        text += f"\n💰 Итого: {total}₽"
+    
+    await query.edit_message_text(text, reply_markup=reply_markup)
 
 async def show_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -248,7 +316,7 @@ async def show_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     option = supabase_get_single('service_options', option_id)
     
     if not option:
-        await query.answer("❌ Опция не найдена")
+        await query.answer("❌ Опция не найдена", show_alert=True)
         return
     
     max_qty = option.get('max_quantity', 10) or 10
@@ -258,7 +326,7 @@ async def show_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i in range(min_qty, min(max_qty, 10) + 1):
         keyboard.append([InlineKeyboardButton(f"{i} шт.", callback_data=f"setqty_{i}")])
     
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data=f"service_{option['service_id']}")])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data=f"svc_{option['service_id']}")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(f"Количество для: {option['name']}", reply_markup=reply_markup)
@@ -294,7 +362,7 @@ async def set_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.answer(f"✅ {option['name']} ×{qty}")
     
-    await show_service_options(update, context)
+    await update_service_options_message(update, context, state)
 
 async def finish_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -352,7 +420,7 @@ async def handle_description(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=reply_markup
         )
     else:
-        await update.message.reply_text("❌ Ошибка при создании заказа. Попробуйте позже.")
+        await update.message.reply_text("❌ Ошибка при создании заказа.")
 
 async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -509,7 +577,7 @@ def main():
     application.add_handler(CallbackQueryHandler(toggle_option, pattern='^toggle_'))
     application.add_handler(CallbackQueryHandler(change_status, pattern='^status_'))
     application.add_handler(CallbackQueryHandler(admin_order_detail, pattern='^admin_order_'))
-    application.add_handler(CallbackQueryHandler(show_service_options, pattern='^service_'))
+    application.add_handler(CallbackQueryHandler(show_service_options, pattern='^svc_'))
     application.add_handler(CallbackQueryHandler(finish_options, pattern='^finish_options$'))
     application.add_handler(CallbackQueryHandler(my_orders, pattern='^my_orders$'))
     application.add_handler(CallbackQueryHandler(admin_panel, pattern='^admin_panel$'))
