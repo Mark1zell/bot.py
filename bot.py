@@ -25,7 +25,7 @@ def supabase_get(table, params=None):
         response = requests.get(url, headers=headers, params=params, timeout=15)
         return response.json() if response.status_code == 200 else []
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"GET ERROR: {e}")
         return []
 
 def supabase_get_single(table, id):
@@ -36,7 +36,7 @@ def supabase_get_single(table, id):
         data = response.json()
         return data[0] if data else None
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"GET SINGLE ERROR: {e}")
         return None
 
 def supabase_insert(table, data):
@@ -52,7 +52,7 @@ def supabase_insert(table, data):
         data = response.json()
         return data[0] if data else None
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"INSERT ERROR: {e}")
         return None
 
 def supabase_update(table, id, data):
@@ -67,7 +67,7 @@ def supabase_update(table, id, data):
         response = requests.patch(url, headers=headers, json=data, timeout=15)
         return response.json() if response.ok else None
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"UPDATE ERROR: {e}")
         return None
 
 def upload_file(file_data, file_name, folder):
@@ -84,7 +84,7 @@ def upload_file(file_data, file_name, folder):
             return f"{SUPABASE_URL}/storage/v1/object/public/{folder}/{file_name}"
         return None
     except Exception as e:
-        print(f"Upload error: {e}")
+        print(f"UPLOAD ERROR: {e}")
         return None
 
 # Состояния
@@ -142,6 +142,80 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
 
+async def show_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    services = supabase_get('services', {'order': 'id.asc'})
+    if not services:
+        await query.edit_message_text("❌ Услуги не загружены.")
+        return
+    keyboard = []
+    for service in services:
+        keyboard.append([InlineKeyboardButton(f"{service.get('emoji','📦')} {service['name']}", callback_data=f"svc_{service['id']}")])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')])
+    await query.edit_message_text("🛠️ Выберите услугу:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    user_identifier = user.username or user.first_name or str(user.id)
+    orders = supabase_get('orders', {'or': f'(user_username.eq.{user_identifier},user_name.eq.{user_identifier})', 'order': 'timestamp.desc'})
+    if not orders:
+        await query.edit_message_text("📋 Нет заказов.")
+        return
+    status_map = {'pending_payment': '⏳', 'paid_card': '💳', 'not_started': '🔴', 'in_progress': '🟡', 'ready': '✅'}
+    keyboard = []
+    for order in orders:
+        emoji = status_map.get(order.get('status'), '❓')
+        keyboard.append([InlineKeyboardButton(f"{emoji} #{order['id']} - {order['service']}", callback_data=f"my_order_{order['id']}")])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')])
+    await query.edit_message_text("📋 Ваши заказы:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def my_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split('_')
+    order_id = int(parts[2])
+    order = supabase_get_single('orders', order_id)
+    if not order:
+        await query.edit_message_text("Заказ не найден.")
+        return
+    
+    status_map = {
+        'pending_payment': '⏳ Ожидает оплаты',
+        'paid_card': '💳 Оплачен',
+        'not_started': '🔴 Дизайнер ещё не приступил',
+        'in_progress': '🟡 Дизайнер приступил к вашей работе',
+        'ready': '✅ Работа готова!'
+    }
+    
+    text = f"📋 Заказ #{order['id']}\n\n"
+    text += f"Услуга: {order['service']}\n"
+    text += f"Статус: {status_map.get(order.get('status'), order.get('status'))}\n"
+    text += f"Сумма: {order['total']}₽\n"
+    if order.get('description'):
+        text += f"\nТЗ: {order['description']}\n"
+    if order.get('work_message'):
+        text += f"\n💬 Сообщение: {order['work_message']}\n"
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='my_orders')]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def show_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    reviews = supabase_get('reviews', {'order': 'timestamp.desc', 'limit': '10'})
+    if not reviews:
+        await query.edit_message_text("⭐ Отзывов пока нет.")
+        return
+    text = "⭐ Отзывы:\n\n"
+    for review in reviews:
+        stars = '★' * review.get('stars', 5) + '☆' * (5 - review.get('stars', 5))
+        text += f"{stars} {review.get('author_name', 'Аноним')}\n{review.get('text', '')}\n\n"
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
 # Админ-панель
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -153,6 +227,21 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 Все заказы", callback_data='admin_all_orders')],
     ]
     await query.edit_message_text("👑 Админ-панель:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def admin_all_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id != ADMIN_ID:
+        return
+    orders = supabase_get('orders', {'order': 'timestamp.desc', 'limit': '20'})
+    if not orders:
+        await query.edit_message_text("Нет заказов.")
+        return
+    keyboard = []
+    for order in orders:
+        keyboard.append([InlineKeyboardButton(f"#{order['id']} - {order['service']}", callback_data=f"admin_order_{order['id']}")])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')])
+    await query.edit_message_text("Все заказы:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -228,7 +317,6 @@ async def admin_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     
-    # Отправляем референсы
     if order.get('reference_urls'):
         for url in order['reference_urls']:
             try:
@@ -255,7 +343,6 @@ async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     status_text = status_text_map.get(new_status, new_status)
     
-    # Уведомление пользователю
     if order and order.get('user_id'):
         try:
             await context.bot.send_message(
@@ -265,7 +352,6 @@ async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
     
-    # Если готов - разрешаем отзыв
     if new_status == 'ready':
         allow_review(order)
     
@@ -273,7 +359,6 @@ async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await admin_order_detail(update, context)
 
 def allow_review(order):
-    """Разрешает отзыв для пользователя"""
     user_identifier = order.get('user_username') or order.get('user_name') or order.get('user_id')
     if not user_identifier:
         return
@@ -286,8 +371,8 @@ def allow_review(order):
         'time': order.get('time')
     }
     
-    supabase_insert('user_last_review', {
-        'user_id': user_identifier,
+    # Обновляем или создаем запись
+    supabase_update('user_last_review', user_identifier, {
         'can_review': True,
         'order_info': order_info,
         'timestamp': datetime.now().isoformat()
@@ -311,76 +396,6 @@ async def upload_work_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"Отправьте текст сообщения и фото (до 10 шт.)"
     )
 
-async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    state = get_admin_state(user.id)
-    
-    if user.id != ADMIN_ID or not state.uploading_work or not state.selected_order:
-        return
-    
-    order = state.selected_order
-    message_text = update.message.text or update.message.caption or ''
-    photos = []
-    if update.message.photo:
-        photos.append(update.message.photo[-1])
-    
-    if message_text:
-        state.work_message = message_text
-    
-    for photo in photos[:10]:
-        file = await context.bot.get_file(photo.file_id)
-        file_data = await file.download_as_bytearray()
-        file_name = f"work_{order['id']}_{datetime.now().timestamp()}.jpg"
-        file_url = upload_file(bytes(file_data), file_name, 'works')
-        if file_url:
-            state.work_files.append(file_url)
-    
-    if state.work_files and state.work_message:
-        supabase_update('orders', order['id'], {
-            'status': 'ready',
-            'work_files': state.work_files,
-            'work_message': state.work_message
-        })
-        
-        # Разрешаем отзыв
-        allow_review(order)
-        
-        # Уведомляем пользователя
-        chat_id = None
-        if order.get('user_id'):
-            chat_id = int(order['user_id'])
-        elif order.get('user_username'):
-            chat_id = f"@{order['user_username']}"
-        
-        if chat_id:
-            try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"✅ Ваш заказ #{order['id']} готов!\n\n"
-                         f"Сообщение от Дизайнера:\n{state.work_message}"
-                )
-                media_group = [{'type': 'photo', 'media': url} for url in state.work_files[:10]]
-                if media_group:
-                    await context.bot.send_media_group(chat_id=chat_id, media=media_group)
-                
-                # Кнопка для отзыва
-                keyboard = [[InlineKeyboardButton("⭐ Оставить отзыв", callback_data=f'review_{order["id"]}')]]
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="Понравилась работа? Оставьте отзыв!",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-            except Exception as e:
-                print(f"Send error: {e}")
-        
-        state.uploading_work = False
-        state.work_files = []
-        state.work_message = ''
-        await update.message.reply_text("✅ Работа отправлена!")
-    else:
-        await update.message.reply_text(f"📎 Фото: {len(state.work_files)}, Текст: {'✅' if state.work_message else '❌'}")
-
-# Отзывы
 async def start_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -415,12 +430,93 @@ async def set_review_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Напишите ваш отзыв текстом и прикрепите фото (до 3 шт.)"
     )
 
+async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Общий обработчик всех сообщений"""
+    user = update.effective_user
+    state = get_user_state(user.id)
+    admin_state = get_admin_state(user.id)
+    
+    # Проверяем, не загружает ли админ работы
+    if user.id == ADMIN_ID and admin_state.uploading_work:
+        await handle_admin_upload(update, context)
+        return
+    
+    # Проверяем, не оставляет ли пользователь отзыв
+    if state.awaiting_review:
+        await handle_review_message(update, context)
+        return
+    
+    print(f"Необработанное сообщение от {user.id}")
+
+async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    state = get_admin_state(user.id)
+    
+    if not state.uploading_work or not state.selected_order:
+        return
+    
+    order = state.selected_order
+    message_text = update.message.text or update.message.caption or ''
+    photos = []
+    if update.message.photo:
+        photos.append(update.message.photo[-1])
+    
+    if message_text:
+        state.work_message = message_text
+    
+    for photo in photos[:10]:
+        file = await context.bot.get_file(photo.file_id)
+        file_data = await file.download_as_bytearray()
+        file_name = f"work_{order['id']}_{datetime.now().timestamp()}.jpg"
+        file_url = upload_file(bytes(file_data), file_name, 'works')
+        if file_url:
+            state.work_files.append(file_url)
+    
+    if state.work_files and state.work_message:
+        supabase_update('orders', order['id'], {
+            'status': 'ready',
+            'work_files': state.work_files,
+            'work_message': state.work_message
+        })
+        
+        allow_review(order)
+        
+        chat_id = None
+        if order.get('user_id'):
+            chat_id = int(order['user_id'])
+        elif order.get('user_username'):
+            chat_id = f"@{order['user_username']}"
+        
+        if chat_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"✅ Ваш заказ #{order['id']} готов!\n\n"
+                         f"Сообщение от Дизайнера:\n{state.work_message}"
+                )
+                media_group = [{'type': 'photo', 'media': url} for url in state.work_files[:10]]
+                if media_group:
+                    await context.bot.send_media_group(chat_id=chat_id, media=media_group)
+                
+                keyboard = [[InlineKeyboardButton("⭐ Оставить отзыв", callback_data=f'review_{order["id"]}')]]
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="Понравилась работа? Оставьте отзыв!",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            except Exception as e:
+                print(f"Send error: {e}")
+        
+        state.uploading_work = False
+        state.work_files = []
+        state.work_message = ''
+        await update.message.reply_text("✅ Работа отправлена!")
+    else:
+        await update.message.reply_text(f"📎 Фото: {len(state.work_files)}, Текст: {'✅' if state.work_message else '❌'}")
+
 async def handle_review_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     state = get_user_state(user.id)
-    
-    if not state.awaiting_review:
-        return
     
     text = update.message.text or update.message.caption or ''
     photos = []
@@ -439,7 +535,6 @@ async def handle_review_message(update: Update, context: ContextTypes.DEFAULT_TY
             state.review_images.append(file_url)
     
     if state.review_text and state.review_stars > 0:
-        # Сохраняем отзыв
         order_info = None
         if state.current_order_id:
             order = supabase_get_single('orders', state.current_order_id)
@@ -469,7 +564,6 @@ async def handle_review_message(update: Update, context: ContextTypes.DEFAULT_TY
         result = supabase_insert('reviews', review_data)
         
         if result:
-            # Сбрасываем can_review
             user_identifier = user.username or user.first_name or str(user.id)
             supabase_update('user_last_review', user_identifier, {'can_review': False})
             
@@ -487,20 +581,6 @@ async def handle_review_message(update: Update, context: ContextTypes.DEFAULT_TY
             f"Отправьте текст и фото одним сообщением"
         )
 
-async def show_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    reviews = supabase_get('reviews', {'order': 'timestamp.desc', 'limit': '10'})
-    if not reviews:
-        await query.edit_message_text("⭐ Отзывов пока нет.")
-        return
-    text = "⭐ Отзывы:\n\n"
-    for review in reviews:
-        stars = '★' * review.get('stars', 5) + '☆' * (5 - review.get('stars', 5))
-        text += f"{stars} {review.get('author_name', 'Аноним')}\n{review.get('text', '')}\n\n"
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
 async def back_to_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -515,13 +595,18 @@ def main():
     application.add_handler(CallbackQueryHandler(admin_order_detail, pattern='^admin_order_'))
     application.add_handler(CallbackQueryHandler(admin_user_orders, pattern='^admin_user_'))
     application.add_handler(CallbackQueryHandler(admin_users, pattern='^admin_users$'))
+    application.add_handler(CallbackQueryHandler(admin_all_orders, pattern='^admin_all_orders$'))
     application.add_handler(CallbackQueryHandler(admin_panel, pattern='^admin_panel$'))
+    application.add_handler(CallbackQueryHandler(my_order_detail, pattern='^my_order_'))
+    application.add_handler(CallbackQueryHandler(show_services, pattern='^services$'))
     application.add_handler(CallbackQueryHandler(start_review, pattern='^review_'))
     application.add_handler(CallbackQueryHandler(set_review_stars, pattern='^review_stars_'))
     application.add_handler(CallbackQueryHandler(show_reviews, pattern='^show_reviews$'))
+    application.add_handler(CallbackQueryHandler(my_orders, pattern='^my_orders$'))
     application.add_handler(CallbackQueryHandler(back_to_start, pattern='^back_to_start$'))
-    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_review_message))
-    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_admin_upload))
+    
+    # ОДИН общий обработчик сообщений
+    application.add_handler(MessageHandler(filters.ALL, handle_all_messages))
     
     application.run_polling(drop_pending_updates=True)
 
