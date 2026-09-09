@@ -354,6 +354,20 @@ async def handle_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if result:
         order_id = result['id']
         context.user_data['awaiting_order'] = False
+        
+        # Уведомление админу о новом заказе
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"🆕 Новый заказ #{order_id}!\n\n"
+                     f"Услуга: {order_data['service']}\n"
+                     f"Сумма: {total}₽\n"
+                     f"Клиент: @{user.username or user.first_name}\n"
+                     f"Статус: Ожидает оплаты"
+            )
+        except Exception as e:
+            print(f"Ошибка уведомления админа: {e}")
+        
         payment = create_yookassa_payment(order_id, total, f"Оплата заказа #{order_id}")
         if payment and payment.get('confirmation', {}).get('confirmation_url'):
             supabase_update('orders', order_id, {'payment_id': payment['id']})
@@ -382,9 +396,57 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = response.json()
         if data.get('status') == 'succeeded':
             supabase_update('orders', order_id, {'status': 'paid_card', 'paid_at': datetime.now().isoformat()})
+            
+            # Уведомление админу об оплате
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"💰 Заказ #{order_id} оплачен!\n\n"
+                     f"Услуга: {order['service']}\n"
+                     f"Сумма: {order['total']}₽\n"
+                     f"Клиент: @{order.get('user_username', 'нет')}"
+            )
+            
             await query.edit_message_text("✅ Оплата прошла! Дизайнер скоро приступит.")
         else:
             await query.edit_message_text(f"⏳ Статус: {data.get('status')}")
+
+# Автоматическая проверка платежей
+async def auto_check_payments(context: ContextTypes.DEFAULT_TYPE):
+    """Автоматическая проверка платежей каждые 30 секунд"""
+    orders = supabase_get('orders', {'status': 'eq.pending_payment'})
+    
+    for order in orders:
+        if not order.get('payment_id'):
+            continue
+        
+        auth_string = f"{YUKASSA_SHOP_ID}:{YUKASSA_SECRET_KEY}"
+        auth_base64 = base64.b64encode(auth_string.encode()).decode()
+        
+        try:
+            response = requests.get(
+                f"https://api.yookassa.ru/v3/payments/{order['payment_id']}",
+                headers={'Authorization': f'Basic {auth_base64}'},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('status') == 'succeeded':
+                    supabase_update('orders', order['id'], {
+                        'status': 'paid_card',
+                        'paid_at': datetime.now().isoformat()
+                    })
+                    
+                    await context.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=f"💰 Заказ #{order['id']} оплачен (автопроверка)!\n\n"
+                             f"Услуга: {order['service']}\n"
+                             f"Сумма: {order['total']}₽\n"
+                             f"Клиент: @{order.get('user_username', 'нет')}"
+                    )
+                    print(f"✅ Заказ #{order['id']} оплачен (автопроверка)")
+        except Exception as e:
+            print(f"Ошибка автопроверки: {e}")
 
 async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -650,100 +712,4 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             try:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"✅ Ваш заказ #{order['id']} готов!\n\nСообщение от Дизайнера:\n{state.work_message}"
-                )
-                media_group = [{'type': 'photo', 'media': url} for url in state.work_files[:10]]
-                if media_group:
-                    await context.bot.send_media_group(chat_id=chat_id, media=media_group)
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="⭐ Напишите ваш отзыв в приложении!"
-                )
-                print(f"✅ Отправлено в бот: {chat_id}")
-            except Exception as e:
-                print(f"ℹ️ Не удалось отправить в бот (пользователь не начал диалог): {e}")
-                print(f"✅ Работа сохранена в приложении")
-        
-        state.uploading_work = False
-        state.work_files = []
-        state.work_message = ''
-        await update.message.reply_text("✅ Работа сохранена! Пользователь увидит в приложении.")
-    else:
-        await update.message.reply_text(f"📎 Получено: {len(state.work_files)} фото\nТекст: {'✅' if state.work_message else '❌'}\nОтправьте еще или /done для завершения")
-
-async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.from_user.id != ADMIN_ID:
-        return
-    parts = query.data.split('_')
-    if len(parts) < 3:
-        return
-    order_id = int(parts[1])
-    new_status = parts[2]
-    supabase_update('orders', order_id, {'status': new_status})
-    order = supabase_get_single('orders', order_id)
-    
-    if order:
-        status_text = {
-            'not_started': '🔴 Ещё не приступили',
-            'in_progress': '🟡 Готовится',
-            'ready': '✅ Готов!'
-        }.get(new_status, new_status)
-        
-        chat_id = None
-        if order.get('user_id'):
-            chat_id = int(order['user_id'])
-        elif order.get('user_username'):
-            chat_id = f"@{order['user_username']}"
-        
-        if chat_id:
-            try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"📋 Обновление статуса заказа #{order_id}\n\n"
-                         f"Услуга: {order['service']}\n"
-                         f"Статус: {status_text}\n"
-                         f"Сумма: {order['total']}₽"
-                )
-                print(f"✅ Уведомление отправлено: {chat_id}")
-            except Exception as e:
-                print(f"ℹ️ Не удалось отправить в бот: {e}")
-                print(f"✅ Статус обновлен в приложении (realtime)")
-    
-    await query.answer(f"✅ Статус обновлен!")
-    await admin_order_detail(update, context)
-
-async def back_to_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await start(update, context)
-
-def main():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(CallbackQueryHandler(set_qty, pattern='^setqty_'))
-    application.add_handler(CallbackQueryHandler(show_qty, pattern='^qty_'))
-    application.add_handler(CallbackQueryHandler(toggle_option, pattern='^toggle_'))
-    application.add_handler(CallbackQueryHandler(check_payment, pattern='^check_payment_'))
-    application.add_handler(CallbackQueryHandler(change_status, pattern='^status_'))
-    application.add_handler(CallbackQueryHandler(upload_work_prompt, pattern='^upload_work_'))
-    application.add_handler(CallbackQueryHandler(my_order_detail, pattern='^my_order_'))
-    application.add_handler(CallbackQueryHandler(admin_order_detail, pattern='^admin_order_'))
-    application.add_handler(CallbackQueryHandler(admin_user_orders, pattern='^admin_user_'))
-    application.add_handler(CallbackQueryHandler(show_service_options, pattern='^svc_'))
-    application.add_handler(CallbackQueryHandler(finish_options, pattern='^finish_options$'))
-    application.add_handler(CallbackQueryHandler(show_reviews, pattern='^show_reviews$'))
-    application.add_handler(CallbackQueryHandler(my_orders, pattern='^my_orders$'))
-    application.add_handler(CallbackQueryHandler(admin_panel, pattern='^admin_panel$'))
-    application.add_handler(CallbackQueryHandler(admin_users, pattern='^admin_users$'))
-    application.add_handler(CallbackQueryHandler(admin_all_orders, pattern='^admin_all_orders$'))
-    application.add_handler(CallbackQueryHandler(back_to_start, pattern='^back_to_start$'))
-    application.add_handler(CallbackQueryHandler(show_services, pattern='^services$'))
-    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_admin_upload))
-    
-    application.run_polling(drop_pending_updates=True)
-
-if __name__ == '__main__':
-    main()
+                    text=f"✅ Ваш заказ #{order['id']} готов!\n\n
