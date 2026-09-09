@@ -2,15 +2,10 @@ import os
 import logging
 import json
 import asyncio
-import sys
 import requests
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-
-# Для совместимости с Python 3.12+
-if sys.version_info >= (3, 12):
-    asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
 # Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -282,10 +277,7 @@ async def handle_description(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     if result:
         order_id = result['id']
-        
-        keyboard = [
-            [InlineKeyboardButton("🔙 В начало", callback_data='back_to_start')],
-        ]
+        keyboard = [[InlineKeyboardButton("🔙 В начало", callback_data='back_to_start')]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
@@ -459,7 +451,8 @@ def main():
     application.add_handler(CallbackQueryHandler(back_to_start, pattern='^back_to_start$'))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_description))
     
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Используем asyncio.run для Python 3.14
+    asyncio.run(application.run_polling(allowed_updates=Update.ALL_TYPES))
 
 if __name__ == '__main__':
     main()
