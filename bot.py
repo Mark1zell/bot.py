@@ -119,6 +119,7 @@ class AdminState:
         self.work_message = ''
         self.pending_photos = []
         self.pending_message = ''
+        self.processing = False
 
 def get_user_state(user_id):
     if user_id not in user_states:
@@ -138,7 +139,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         supabase_update_by_username('orders', user.username, {'user_id': str(user.id)})
     
     if user.id == ADMIN_ID:
-        # Админ сразу видит все кнопки управления
         keyboard = [
             [InlineKeyboardButton("👥 Пользователи", callback_data='admin_users')],
             [InlineKeyboardButton("📋 Все заказы", callback_data='admin_all_orders')],
@@ -176,26 +176,21 @@ async def show_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def my_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает отзывы текущего пользователя"""
     query = update.callback_query
     await query.answer()
     user = query.from_user
     user_identifier = user.username or user.first_name or str(user.id)
-    
     reviews = supabase_get('reviews', {
         'or': f'(author_username.eq.{user_identifier},author_id.eq.{str(user.id)})',
         'order': 'timestamp.desc'
     })
-    
     if not reviews:
         await query.edit_message_text("📝 У вас пока нет отзывов.")
         return
-    
     text = "📝 Ваши отзывы:\n\n"
     for review in reviews:
         stars = '★' * review.get('stars', 5) + '☆' * (5 - review.get('stars', 5))
         text += f"{stars}\n{review.get('text', '')}\n\n"
-    
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -273,7 +268,6 @@ async def admin_all_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("Все заказы:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_not_started(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает заказы со статусом not_started и paid_card"""
     query = update.callback_query
     await query.answer()
     if query.from_user.id != ADMIN_ID:
@@ -392,7 +386,7 @@ async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             sent = True
         except Exception as e:
-            print(f"❌ Ошибка user_id: {e}")
+            print(f"❌ user_id: {e}")
     
     if not sent and order and order.get('user_username'):
         try:
@@ -401,7 +395,7 @@ async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=f"📋 Статус заказа #{order_id}: {status_text}"
             )
         except Exception as e:
-            print(f"❌ Ошибка username: {e}")
+            print(f"❌ username: {e}")
     
     await query.answer("✅ Статус обновлен!")
     try:
@@ -425,6 +419,7 @@ async def upload_work_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
     state.work_message = ''
     state.pending_photos = []
     state.pending_message = ''
+    state.processing = False
     
     await query.edit_message_text(
         f"📎 Загрузка работы для заказа #{order_id}\n\n"
@@ -480,7 +475,6 @@ async def done_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Сначала введите текст отзыва.")
         return
     
-    # Публикуем отзыв
     order_info = None
     if state.current_order_id:
         order = supabase_get_single('orders', state.current_order_id)
@@ -560,6 +554,9 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not state.uploading_work or not state.selected_order:
         return
     
+    if state.processing:
+        return
+    
     order = state.selected_order
     message_text = update.message.text or update.message.caption or ''
     
@@ -570,14 +567,39 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         photo = update.message.photo[-1]
         if photo.file_id not in [p.file_id for p in state.pending_photos]:
             state.pending_photos.append(photo)
+            print(f"📸 Получено фото: {len(state.pending_photos)}")
     
+    # Если media_group - ждем остальные фото
     if update.message.media_group_id:
-        if len(state.pending_photos) < 10:
-            await update.message.reply_text(f"📸 Получено: {len(state.pending_photos)} фото")
-            return
+        await update.message.reply_text(f"📸 Получено: {len(state.pending_photos)} фото")
+        # Запускаем отложенную обработку
+        if not state.processing:
+            state.processing = True
+            context.job_queue.run_once(
+                process_pending_work,
+                3,
+                data={'admin_id': user.id}
+            )
+        return
     
-    await asyncio.sleep(1)
+    # Одиночное сообщение - обрабатываем сразу
+    await process_pending_work(context, user.id)
+
+async def process_pending_work(context, admin_id=None):
+    if admin_id is None:
+        admin_id = context.job.data.get('admin_id')
     
+    state = get_admin_state(admin_id)
+    
+    if not state.uploading_work or not state.selected_order:
+        state.processing = False
+        return
+    
+    order = state.selected_order
+    
+    print(f"DEBUG: Обработка {len(state.pending_photos)} фото")
+    
+    # Загружаем все фото
     for photo in state.pending_photos[:10]:
         try:
             file = await context.bot.get_file(photo.file_id)
@@ -586,8 +608,9 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             file_url = upload_file(bytes(file_data), file_name, 'works')
             if file_url:
                 state.work_files.append(file_url)
+                print(f"✅ Фото загружено")
         except Exception as e:
-            print(f"❌ Ошибка загрузки: {e}")
+            print(f"❌ Ошибка: {e}")
     
     state.work_message = state.pending_message
     state.pending_photos = []
@@ -609,6 +632,7 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
                 chat_id = int(order.get('user_id'))
                 await context.bot.send_message(chat_id=chat_id, text=f"✅ Ваш заказ #{order.get('id')} готов!\n\nСообщение от Дизайнера:\n{state.work_message}")
                 sent = True
+                print(f"✅ Отправлено user_id")
             except Exception as e:
                 print(f"❌ user_id: {e}")
         
@@ -617,6 +641,7 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
                 chat_id = f"@{order.get('user_username')}"
                 await context.bot.send_message(chat_id=chat_id, text=f"✅ Ваш заказ #{order.get('id')} готов!\n\nСообщение от Дизайнера:\n{state.work_message}")
                 sent = True
+                print(f"✅ Отправлено username")
             except Exception as e:
                 print(f"❌ username: {e}")
         
@@ -624,6 +649,7 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             try:
                 for url in state.work_files[:10]:
                     await context.bot.send_photo(chat_id=chat_id, photo=url)
+                print("✅ Фото отправлены")
             except Exception as e:
                 print(f"❌ фото: {e}")
         
@@ -631,6 +657,7 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             try:
                 keyboard = [[InlineKeyboardButton("⭐ Оставить отзыв", callback_data=f'review_{order.get("id")}')]]
                 await context.bot.send_message(chat_id=chat_id, text="Понравилась работа? Оставьте отзыв!", reply_markup=InlineKeyboardMarkup(keyboard))
+                print("✅ Кнопка отправлена")
             except Exception as e:
                 print(f"❌ кнопка: {e}")
         
@@ -638,18 +665,28 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         state.work_files = []
         state.work_message = ''
         
-        if sent:
-            await update.message.reply_text(f"✅ Работа отправлена! Фото: {len(state.work_files)}")
-        else:
-            await update.message.reply_text("✅ Работа сохранена!")
+        try:
+            if sent:
+                await context.bot.send_message(chat_id=admin_id, text="✅ Работа отправлена клиенту!")
+            else:
+                await context.bot.send_message(chat_id=admin_id, text="✅ Работа сохранена! (пользователь не подписан)")
+        except:
+            pass
     else:
-        await update.message.reply_text(f"📎 Фото: {len(state.work_files)}, Текст: {'✅' if state.work_message else '❌'}")
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=f"📎 Фото: {len(state.work_files)}, Текст: {'✅' if state.work_message else '❌'}"
+            )
+        except:
+            pass
+    
+    state.processing = False
 
 async def handle_review_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     state = get_user_state(user.id)
     
-    # Если еще нет текста отзыва
     if not state.review_text:
         text = update.message.text or update.message.caption or ''
         if text and text != '/done':
@@ -661,7 +698,6 @@ async def handle_review_message(update: Update, context: ContextTypes.DEFAULT_TY
             )
         return
     
-    # Если текст есть - обрабатываем фото
     if update.message.photo:
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
