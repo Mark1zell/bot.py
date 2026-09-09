@@ -23,7 +23,7 @@ def supabase_get(table, params=None):
         response = requests.get(url, headers=headers, params=params, timeout=15)
         return response.json() if response.status_code == 200 else []
     except Exception as e:
-        print(f"GET ERROR: {e}")
+        print(f"ERROR: {e}")
         return []
 
 def supabase_get_single(table, id):
@@ -50,7 +50,7 @@ def supabase_insert(table, data):
         data = response.json()
         return data[0] if data else None
     except Exception as e:
-        print(f"INSERT ERROR: {e}")
+        print(f"ERROR: {e}")
         return None
 
 def supabase_update(table, id, data):
@@ -65,7 +65,7 @@ def supabase_update(table, id, data):
         response = requests.patch(url, headers=headers, json=data, timeout=15)
         return response.json() if response.ok else None
     except Exception as e:
-        print(f"UPDATE ERROR: {e}")
+        print(f"ERROR: {e}")
         return None
 
 def supabase_update_by_username(table, username, data):
@@ -120,6 +120,7 @@ class AdminState:
         self.pending_photos = []
         self.pending_message = ''
         self.processing = False
+        self.pending_job = None
 
 def get_user_state(user_id):
     if user_id not in user_states:
@@ -420,6 +421,7 @@ async def upload_work_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
     state.pending_photos = []
     state.pending_message = ''
     state.processing = False
+    state.pending_job = None
     
     await query.edit_message_text(
         f"📎 Загрузка работы для заказа #{order_id}\n\n"
@@ -555,6 +557,15 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     if state.processing:
+        # Если обработка уже запущена - просто добавляем фото
+        message_text = update.message.text or update.message.caption or ''
+        if message_text:
+            state.pending_message = message_text
+        if update.message.photo:
+            photo = update.message.photo[-1]
+            if photo.file_id not in [p.file_id for p in state.pending_photos]:
+                state.pending_photos.append(photo)
+                print(f"📸 Добавлено фото: {len(state.pending_photos)}")
         return
     
     order = state.selected_order
@@ -569,21 +580,19 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             state.pending_photos.append(photo)
             print(f"📸 Получено фото: {len(state.pending_photos)}")
     
-    # Если media_group - ждем остальные фото
-    if update.message.media_group_id:
-        await update.message.reply_text(f"📸 Получено: {len(state.pending_photos)} фото")
-        # Запускаем отложенную обработку
-        if not state.processing:
-            state.processing = True
-            context.job_queue.run_once(
-                process_pending_work,
-                3,
-                data={'admin_id': user.id}
-            )
-        return
+    # Запускаем обработку через 3 секунды
+    state.processing = True
     
-    # Одиночное сообщение - обрабатываем сразу
-    await process_pending_work(context, user.id)
+    if state.pending_job:
+        state.pending_job.schedule_removal()
+    
+    state.pending_job = context.job_queue.run_once(
+        process_pending_work,
+        3,
+        data={'admin_id': user.id}
+    )
+    
+    await update.message.reply_text(f"📸 Получено: {len(state.pending_photos)} фото")
 
 async def process_pending_work(context, admin_id=None):
     if admin_id is None:
@@ -598,6 +607,7 @@ async def process_pending_work(context, admin_id=None):
     order = state.selected_order
     
     print(f"DEBUG: Обработка {len(state.pending_photos)} фото")
+    print(f"DEBUG: Текст: {state.pending_message}")
     
     # Загружаем все фото
     for photo in state.pending_photos[:10]:
@@ -669,14 +679,14 @@ async def process_pending_work(context, admin_id=None):
             if sent:
                 await context.bot.send_message(chat_id=admin_id, text="✅ Работа отправлена клиенту!")
             else:
-                await context.bot.send_message(chat_id=admin_id, text="✅ Работа сохранена! (пользователь не подписан)")
+                await context.bot.send_message(chat_id=admin_id, text="✅ Работа сохранена!")
         except:
             pass
     else:
         try:
             await context.bot.send_message(
                 chat_id=admin_id,
-                text=f"📎 Фото: {len(state.work_files)}, Текст: {'✅' if state.work_message else '❌'}"
+                text=f"📎 Фото: {len(state.work_files)}, Текст: {'✅' if state.work_message else '❌'}\nОтправьте текст и фото одним сообщением"
             )
         except:
             pass
