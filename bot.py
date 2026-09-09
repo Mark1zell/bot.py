@@ -11,53 +11,83 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # Конфигурация
-SUPABASE_URL = os.environ.get('SUPABASE_URL', 'https://lcgbpwowppwwpjjlphod.supabase.co')
-SUPABASE_KEY = os.environ.get('SUPABASE_KEY', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxjZ2Jwd293cHB3d3BqamxwaG9kIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg2NDAwNTMsImV4cCI6MjEwNDIxNjA1M30.95VPot7saWmlgv1IzBop3E4x-ZxSc8HepqKdDLJa7JI')
+SUPABASE_URL = 'https://lcgbpwowppwwpjjlphod.supabase.co'
+SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxjZ2Jwd293cHB3d3BqamxwaG9kIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg2NDAwNTMsImV4cCI6MjEwNDIxNjA1M30.95VPot7saWmlgv1IzBop3E4x-ZxSc8HepqKdDLJa7JI'
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8649063131:AAGZknHiTFk1-Qmi02aCwd-yjD2A03eb-LU')
 ADMIN_ID = int(os.environ.get('ADMIN_ID', '1492590083'))
 
-# Функции для работы с Supabase через HTTP
+# Функции для работы с Supabase
 def supabase_get(table, params=None):
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
-    headers = {
-        'apikey': SUPABASE_KEY,
-        'Authorization': f'Bearer {SUPABASE_KEY}'
-    }
-    response = requests.get(url, headers=headers, params=params)
-    return response.json() if response.ok else []
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/{table}"
+        headers = {
+            'apikey': SUPABASE_KEY,
+            'Authorization': f'Bearer {SUPABASE_KEY}',
+            'Content-Type': 'application/json'
+        }
+        response = requests.get(url, headers=headers, params=params, timeout=15)
+        print(f"DEBUG GET {table}: {response.status_code}")
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"ERROR: {response.text[:200]}")
+            return []
+    except Exception as e:
+        print(f"EXCEPTION: {e}")
+        return []
 
 def supabase_get_single(table, id):
-    url = f"{SUPABASE_URL}/rest/v1/{table}?id=eq.{id}"
-    headers = {
-        'apikey': SUPABASE_KEY,
-        'Authorization': f'Bearer {SUPABASE_KEY}'
-    }
-    response = requests.get(url, headers=headers)
-    data = response.json()
-    return data[0] if data else None
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/{table}?id=eq.{id}"
+        headers = {
+            'apikey': SUPABASE_KEY,
+            'Authorization': f'Bearer {SUPABASE_KEY}',
+            'Content-Type': 'application/json'
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        print(f"DEBUG GET SINGLE {table}/{id}: {response.status_code}")
+        if response.status_code == 200:
+            data = response.json()
+            return data[0] if data else None
+        return None
+    except Exception as e:
+        print(f"EXCEPTION: {e}")
+        return None
 
 def supabase_insert(table, data):
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
-    headers = {
-        'apikey': SUPABASE_KEY,
-        'Authorization': f'Bearer {SUPABASE_KEY}',
-        'Content-Type': 'application/json',
-        'Prefer': 'return=representation'
-    }
-    response = requests.post(url, headers=headers, json=data)
-    data = response.json()
-    return data[0] if data else None
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/{table}"
+        headers = {
+            'apikey': SUPABASE_KEY,
+            'Authorization': f'Bearer {SUPABASE_KEY}',
+            'Content-Type': 'application/json',
+            'Prefer': 'return=representation'
+        }
+        response = requests.post(url, headers=headers, json=data, timeout=15)
+        print(f"DEBUG INSERT {table}: {response.status_code}")
+        if response.status_code in [200, 201]:
+            data = response.json()
+            return data[0] if data else None
+        return None
+    except Exception as e:
+        print(f"EXCEPTION: {e}")
+        return None
 
 def supabase_update(table, id, data):
-    url = f"{SUPABASE_URL}/rest/v1/{table}?id=eq.{id}"
-    headers = {
-        'apikey': SUPABASE_KEY,
-        'Authorization': f'Bearer {SUPABASE_KEY}',
-        'Content-Type': 'application/json',
-        'Prefer': 'return=representation'
-    }
-    response = requests.patch(url, headers=headers, json=data)
-    return response.json() if response.ok else None
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/{table}?id=eq.{id}"
+        headers = {
+            'apikey': SUPABASE_KEY,
+            'Authorization': f'Bearer {SUPABASE_KEY}',
+            'Content-Type': 'application/json',
+            'Prefer': 'return=representation'
+        }
+        response = requests.patch(url, headers=headers, json=data, timeout=15)
+        print(f"DEBUG UPDATE {table}/{id}: {response.status_code}")
+        return response.json() if response.ok else None
+    except Exception as e:
+        print(f"EXCEPTION: {e}")
+        return None
 
 # Временное хранилище
 user_states = {}
@@ -99,9 +129,10 @@ async def show_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     services = supabase_get('services', {'order': 'order.asc'})
+    print(f"DEBUG: services = {services}")
     
     if not services:
-        await query.edit_message_text("Услуги пока не добавлены.")
+        await query.edit_message_text("Услуги пока не добавлены или ошибка подключения.")
         return
     
     keyboard = []
@@ -119,12 +150,18 @@ async def show_service_options(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
-    service_id = int(query.data.split('_')[1])
+    data = query.data
+    parts = data.split('_')
+    service_id = int(parts[1])
+    
     service = supabase_get_single('services', service_id)
     options = supabase_get('service_options', {'service_id': f'eq.{service_id}', 'order': 'order.asc'})
     
+    print(f"DEBUG: service = {service}")
+    print(f"DEBUG: options = {options}")
+    
     if not service:
-        await query.edit_message_text("Услуга не найдена.")
+        await query.edit_message_text(f"Услуга не найдена (ID: {service_id})")
         return
     
     state = get_user_state(query.from_user.id)
@@ -159,11 +196,15 @@ async def toggle_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    option_id = int(query.data.split('_')[1])
-    state = get_user_state(query.from_user.id)
+    data = query.data
+    parts = data.split('_')
+    option_id = int(parts[1])
     
+    state = get_user_state(query.from_user.id)
     option = supabase_get_single('service_options', option_id)
+    
     if not option:
+        await query.answer("❌ Опция не найдена")
         return
     
     if option_id in state.selected_options:
@@ -182,11 +223,15 @@ async def show_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    option_id = int(query.data.split('_')[1])
+    data = query.data
+    parts = data.split('_')
+    option_id = int(parts[1])
     context.user_data['qty_option_id'] = option_id
     
     option = supabase_get_single('service_options', option_id)
+    
     if not option:
+        await query.answer("❌ Опция не найдена")
         return
     
     max_qty = option.get('max_quantity', 10) or 10
@@ -205,7 +250,10 @@ async def set_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    qty = int(query.data.split('_')[1])
+    data = query.data
+    parts = data.split('_')
+    qty = int(parts[1])
+    
     option_id = context.user_data.get('qty_option_id')
     state = get_user_state(query.from_user.id)
     
@@ -436,18 +484,18 @@ def main():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CallbackQueryHandler(show_services, pattern='^services$'))
-    application.add_handler(CallbackQueryHandler(show_service_options, pattern='^service_'))
-    application.add_handler(CallbackQueryHandler(toggle_option, pattern='^toggle_'))
-    application.add_handler(CallbackQueryHandler(show_qty, pattern='^qty_'))
     application.add_handler(CallbackQueryHandler(set_qty, pattern='^setqty_'))
+    application.add_handler(CallbackQueryHandler(show_qty, pattern='^qty_'))
+    application.add_handler(CallbackQueryHandler(toggle_option, pattern='^toggle_'))
+    application.add_handler(CallbackQueryHandler(change_status, pattern='^status_'))
+    application.add_handler(CallbackQueryHandler(admin_order_detail, pattern='^admin_order_'))
+    application.add_handler(CallbackQueryHandler(show_service_options, pattern='^service_'))
     application.add_handler(CallbackQueryHandler(finish_options, pattern='^finish_options$'))
     application.add_handler(CallbackQueryHandler(my_orders, pattern='^my_orders$'))
     application.add_handler(CallbackQueryHandler(admin_panel, pattern='^admin_panel$'))
     application.add_handler(CallbackQueryHandler(admin_orders, pattern='^admin_'))
-    application.add_handler(CallbackQueryHandler(admin_order_detail, pattern='^admin_order_'))
-    application.add_handler(CallbackQueryHandler(change_status, pattern='^status_'))
     application.add_handler(CallbackQueryHandler(back_to_start, pattern='^back_to_start$'))
+    application.add_handler(CallbackQueryHandler(show_services, pattern='^services$'))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_description))
     
     application.run_polling(drop_pending_updates=True)
