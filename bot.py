@@ -453,7 +453,7 @@ def main():
     application.add_handler(CallbackQueryHandler(back_to_start, pattern='^back_to_start$'))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_description))
     
-    application.run_polling()
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
