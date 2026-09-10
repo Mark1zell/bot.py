@@ -513,47 +513,54 @@ async def set_review_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def done_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     state = get_user_state(user.id)
-    
+
     if not state.awaiting_review:
         await update.message.reply_text("Нет активного отзыва.")
         return
-    
+
     if not state.review_text:
         await update.message.reply_text("Сначала введите текст отзыва.")
         return
-    
+
     order_info = None
     if state.current_order_id:
         order = supabase_get_single('orders', state.current_order_id)
         if order:
+            try:
+                options_raw = order.get('options')
+                if isinstance(options_raw, str):
+                    options = json.loads(options_raw)
+                elif isinstance(options_raw, list):
+                    options = options_raw
+                else:
+                    options = []
+            except Exception:
+                options = []
+
             order_info = {
                 'service': order.get('service'),
                 'total': order.get('total'),
-                'options': json.loads(order.get('options', '[]')),
+                'options': options,
                 'time': order.get('time')
             }
-    
-    review_data = {
-        'author_name': user.first_name or user.username or 'Пользователь',
-        'author_username': user.username,
-        'author_id': str(user.id),
-        'stars': state.review_stars,
-        'text': state.review_text,
-        'images': state.review_images,
-        'order_info': order_info,
-        'likes_heart': 0,
-        'likes_fire': 0,
-        'likes_plus': 0,
-        'admin_reply': '',
-        'timestamp': datetime.now().isoformat()
-    }
-    
-    result = supabase_insert('reviews', review_data)
-    
+
+    review_data = { ... }
+
+    try:
+        result = supabase_insert('reviews', review_data)
+    except Exception as e:
+        logger.exception("Ошибка вставки отзыва")
+        await update.message.reply_text("❌ Ошибка при публикации. Попробуйте позже.")
+        return
+
     if result:
         user_identifier = user.username or user.first_name or str(user.id)
-        supabase_update('user_last_review', user_identifier, {'can_review': False})
+        # ФИКС: правильная функция для username
+        supabase_update_by_username('user_last_review', user_identifier, {'can_review': False})
         state.awaiting_review = False
+        state.review_stars = 0
+        state.review_text = ''
+        state.review_images = []
         await update.message.reply_text("✅ Отзыв опубликован! Спасибо!")
     else:
         await update.message.reply_text("❌ Ошибка при публикации.")
@@ -601,188 +608,190 @@ media_group_tracker = {}
 async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     state = get_admin_state(user.id)
-    
+
     if not state.uploading_work or not state.selected_order:
         return
-    
-    order = state.selected_order
+
     message_text = update.message.text or update.message.caption or ''
-    
+
+    # Текст (подпись к фото или отдельное сообщение) — просто сохраняем
     if message_text:
         state.pending_message = message_text
-    
+
+    # Фото — добавляем в pending_photos, защищаясь от дублей по file_id
     if update.message.photo:
         photo = update.message.photo[-1]
-        if photo.file_id not in [p.file_id for p in state.pending_photos]:
+        existing_ids = [p.file_id for p in state.pending_photos]
+        if photo.file_id not in existing_ids:
             state.pending_photos.append(photo)
             print(f"📸 Получено фото: {len(state.pending_photos)}")
-    
-    # media_group обработка
+
+    # Ключ дебаунса: для альбома — по media_group_id, для одиночного — по id сообщения
     media_group_id = update.message.media_group_id
-    
     if media_group_id:
-        # Регистрируем media_group
-        if media_group_id not in media_group_tracker:
-            media_group_tracker[media_group_id] = {
-                'first_seen': datetime.now(),
-                'processed': False
-            }
-        
-        # Ждем 5 секунд для сбора всех фото
-        await asyncio.sleep(5)
-        
-        # Проверяем, не обработана ли уже
-        if media_group_tracker[media_group_id].get('processed'):
-            return
-        
-        media_group_tracker[media_group_id]['processed'] = True
-        
-        # Обрабатываем
-        await process_pending_work(context, user.id)
-        
-        # Удаляем из трекера через 30 секунд
-        async def cleanup():
-            await asyncio.sleep(30)
-            media_group_tracker.pop(media_group_id, None)
-        asyncio.create_task(cleanup())
+        debounce_key = (user.id, f"mg_{media_group_id}")
     else:
-        # Обычное сообщение
-        await asyncio.sleep(2)
-        await process_pending_work(context, user.id)
-    
-    # Если уже обрабатывается - просто добавляем
-    if state.processing:
-        print("DEBUG: Уже обрабатывается, добавляю фото")
-        return
-    
-    # Запускаем обработку
-    state.processing = True
-    print("DEBUG: Запуск обработки")
-    
-    await update.message.reply_text(f"📸 Получено: {len(state.pending_photos)} фото")
-    
-    # Обрабатываем БЕЗ JobQueue
-    await process_pending_work(context, user.id)
+        # Одиночное фото/текст — свой ключ, чтобы не мешать альбомам
+        debounce_key = (user.id, f"msg_{update.message.message_id}")
+
+    # Отменяем предыдущий таймер, если он был
+    old_task = debounce_tasks.get(debounce_key)
+    if old_task and not old_task.done():
+        old_task.cancel()
+
+    # Запускаем новый таймер: ждём 3 секунды тишины, потом обрабатываем
+    async def delayed_process():
+        try:
+            await asyncio.sleep(3)
+            await process_pending_work(context, user.id)
+        except asyncio.CancelledError:
+            # Таймер отменён — пришло новое фото, продолжаем собирать
+            print("DEBUG: Дебаунс продлён, ждём ещё фото")
+            raise
+
+    debounce_tasks[debounce_key] = asyncio.create_task(delayed_process())
+
+    # Немного информируем админа (не спамим — только на первом фото)
+    if len(state.pending_photos) == 1:
+        await update.message.reply_text(
+            "📎 Получено фото: 1\n"
+            "Отправьте остальные фото и/или текст, затем подождите ~3 сек."
+        )
 
 async def process_pending_work(context, admin_id=None):
     state = get_admin_state(admin_id)
-    
+
     if not state.uploading_work or not state.selected_order:
         state.processing = False
         return
-    
+
+    # Если уже обрабатывается — просто выходим (следующий дебаунс дособерёт)
     if state.processing:
+        print("DEBUG: Уже обрабатывается, пропускаем")
         return
-    
+
+    # Если совсем ничего не пришло — ничего не делаем
+    if not state.pending_photos and not state.pending_message:
+        print("DEBUG: Нет ни фото, ни текста, пропускаем")
+        return
+
     state.processing = True
-    
-    order = state.selected_order
-    photos_count = len(state.pending_photos)
-    print(f"DEBUG: Обработка {photos_count} фото")
-    
-    # Загружаем все фото
-    for photo in state.pending_photos[:10]:
-        try:
-            file = await context.bot.get_file(photo.file_id)
-            file_data = await file.download_as_bytearray()
-            file_name = f"work_{order.get('id', '0')}_{datetime.now().timestamp()}_{len(state.work_files)}.jpg"
-            file_url = upload_file(bytes(file_data), file_name, 'works')
-            if file_url:
-                state.work_files.append(file_url)
-                print(f"✅ Фото {len(state.work_files)}/{photos_count} загружено")
-        except Exception as e:
-            print(f"❌ Ошибка: {e}")
-    
-    state.work_message = state.pending_message
-    state.pending_photos = []
-    state.pending_message = ''
-    
-    if state.work_files and state.work_message:
-        supabase_update('orders', order.get('id'), {
-            'status': 'ready',
-            'work_files': state.work_files,
-            'work_message': state.work_message
-        })
-        
-        allow_review(order)
-        
-        sent = False
-        chat_id = None
-        
-        if order.get('user_id'):
+
+    try:
+        order = state.selected_order
+        photos_count = len(state.pending_photos)
+        print(f"DEBUG: Обработка {photos_count} фото")
+
+        # Загружаем все фото
+        for photo in state.pending_photos[:10]:
             try:
-                chat_id = int(order['user_id'])
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"✅ Ваш заказ #{order.get('id')} готов!\n\n"
-                         f"Сообщение от Дизайнера:\n{state.work_message}"
-                )
-                sent = True
-                print(f"✅ Текст отправлен")
+                file = await context.bot.get_file(photo.file_id)
+                file_data = await file.download_as_bytearray()
+                file_name = f"work_{order.get('id', '0')}_{datetime.now().timestamp()}_{len(state.work_files)}.jpg"
+                file_url = upload_file(bytes(file_data), file_name, 'works')
+                if file_url:
+                    state.work_files.append(file_url)
+                    print(f"✅ Фото {len(state.work_files)}/{photos_count} загружено")
             except Exception as e:
-                print(f"❌ user_id: {e}")
-        
-        if not sent and order.get('user_username'):
-            try:
-                chat_id = f"@{order['user_username']}"
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"✅ Ваш заказ #{order.get('id')} готов!\n\n"
-                         f"Сообщение от Дизайнера:\n{state.work_message}"
-                )
-                sent = True
-            except Exception as e:
-                print(f"❌ username: {e}")
-        
-        # Отправляем ВСЕ фото
-        if sent and state.work_files:
-            for i, url in enumerate(state.work_files[:10]):
+                print(f"❌ Ошибка загрузки фото: {e}")
+
+        state.work_message = state.pending_message
+        state.pending_photos = []
+        state.pending_message = ''
+
+        if state.work_files and state.work_message:
+            supabase_update('orders', order.get('id'), {
+                'status': 'ready',
+                'work_files': state.work_files,
+                'work_message': state.work_message
+            })
+
+            allow_review(order)
+
+            sent = False
+            chat_id = None
+
+            if order.get('user_id'):
                 try:
-                    await context.bot.send_photo(chat_id=chat_id, photo=url)
-                    print(f"✅ Фото {i+1}/{len(state.work_files)} отправлено")
-                    await asyncio.sleep(0.5)  # Небольшая пауза между фото
+                    chat_id = int(order['user_id'])
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"✅ Ваш заказ #{order.get('id')} готов!\n\n"
+                             f"Сообщение от Дизайнера:\n{state.work_message}"
+                    )
+                    sent = True
+                    print("✅ Текст отправлен по user_id")
                 except Exception as e:
-                    print(f"❌ Фото {i+1}: {e}")
-        
-        # Кнопка отзыва
-        if sent:
-            try:
-                keyboard = [[InlineKeyboardButton("⭐ Оставить отзыв", callback_data=f'review_{order.get("id")}')]]
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="⭐ Понравилась работа? Оставьте отзыв!",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-            except Exception as e:
-                print(f"❌ Кнопка: {e}")
-        
-        state.uploading_work = False
-        state.work_files = []
-        state.work_message = ''
-        
-        try:
+                    print(f"❌ user_id: {e}")
+
+            if not sent and order.get('user_username'):
+                try:
+                    chat_id = f"@{order['user_username']}"
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"✅ Ваш заказ #{order.get('id')} готов!\n\n"
+                             f"Сообщение от Дизайнера:\n{state.work_message}"
+                    )
+                    sent = True
+                    print("✅ Текст отправлен по username")
+                except Exception as e:
+                    print(f"❌ username: {e}")
+
+            # Отправляем ВСЕ фото
+            if sent and state.work_files:
+                for i, url in enumerate(state.work_files[:10]):
+                    try:
+                        await context.bot.send_photo(chat_id=chat_id, photo=url)
+                        print(f"✅ Фото {i+1}/{len(state.work_files)} отправлено")
+                        await asyncio.sleep(0.5)
+                    except Exception as e:
+                        print(f"❌ Фото {i+1}: {e}")
+
+            # Кнопка отзыва
             if sent:
+                try:
+                    keyboard = [[InlineKeyboardButton(
+                        "⭐ Оставить отзыв",
+                        callback_data=f'review_{order.get("id")}'
+                    )]]
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="⭐ Понравилась работа? Оставьте отзыв!",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                except Exception as e:
+                    print(f"❌ Кнопка: {e}")
+
+            state.uploading_work = False
+            state.work_files = []
+            state.work_message = ''
+
+            try:
+                if sent:
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text=f"✅ Работа отправлена клиенту! Фото: {photos_count}"
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text="✅ Работа сохранена! (пользователь не подписан)"
+                    )
+            except Exception:
+                pass
+        else:
+            # Не хватает текста или фото — сообщаем, но состояние uploading_work НЕ сбрасываем
+            try:
                 await context.bot.send_message(
-                    chat_id=admin_id, 
-                    text=f"✅ Работа отправлена клиенту! Фото: {photos_count}"
+                    chat_id=admin_id,
+                    text=f"❌ Нужно: текст и фото\n"
+                         f"Фото: {len(state.work_files)}, "
+                         f"Текст: {'✅' if state.work_message else '❌'}"
                 )
-            else:
-                await context.bot.send_message(
-                    chat_id=admin_id, 
-                    text=f"✅ Работа сохранена! (пользователь не подписан)"
-                )
-        except:
-            pass
-    else:
-        try:
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=f"❌ Нужно: текст и фото\nФото: {len(state.work_files)}, Текст: {'✅' if state.work_message else '❌'}"
-            )
-        except:
-            pass
-    
-    state.processing = False
+            except Exception:
+                pass
+    finally:
+        state.processing = False
 
 async def handle_review_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
