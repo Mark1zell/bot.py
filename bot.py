@@ -194,6 +194,46 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')])
     await query.edit_message_text("📋 Ваши заказы:", reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def my_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split('_')
+    if len(parts) < 3:
+        return
+    order_id = int(parts[2])
+    order = supabase_get_single('orders', order_id)
+    if not order:
+        await query.edit_message_text("Заказ не найден.")
+        return
+    
+    status_map = {
+        'pending_payment': '⏳ Ожидает оплаты',
+        'paid_card': '💳 Оплачен',
+        'not_started': '🔴 Ещё не приступили',
+        'in_progress': '🟡 Готовится',
+        'ready': '✅ Ваш заказ готов!'
+    }
+    
+    text = f"📋 Заказ #{order.get('id', '?')}\n\n"
+    text += f"Услуга: {order.get('service', 'Нет')}\n"
+    text += f"Статус: {status_map.get(order.get('status'), 'Неизвестно')}\n"
+    text += f"Сумма: {order.get('total', 0)}₽\n"
+    
+    if order.get('work_message'):
+        text += f"\n💬 Сообщение от дизайнера:\n{order.get('work_message')}\n"
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='my_orders')]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    # Отправляем фото работ
+    work_files = order.get('work_files', [])
+    if work_files:
+        for url in work_files[:10]:
+            try:
+                await context.bot.send_photo(chat_id=query.from_user.id, photo=url)
+            except Exception as e:
+                print(f"Ошибка отправки фото: {e}")
+
 async def admin_all_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -311,20 +351,40 @@ async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     supabase_update('orders', order_id, {'status': new_status})
     order = supabase_get_single('orders', order_id)
     
+    # ПРАВИЛЬНЫЕ ТЕКСТЫ СТАТУСОВ
     status_text_map = {
-        'not_started': '🔴 Дизайнер ещё не приступил',
-        'in_progress': '🟡 Дизайнер приступил к вашей работе!',
-        'ready': '✅ Ваша работа готова!'
+        'not_started': '🔴 Ещё не приступили',
+        'in_progress': '🟡 Готовится',
+        'ready': '✅ Ваш заказ готов!'
     }
     status_text = status_text_map.get(new_status, new_status)
     
+    sent = False
+    
     if order and order.get('user_id'):
         try:
-            await context.bot.send_message(chat_id=int(order['user_id']), text=f"📋 Статус заказа #{order_id}: {status_text}")
-        except:
-            pass
+            await context.bot.send_message(
+                chat_id=int(order['user_id']),
+                text=f"📋 Статус заказа #{order_id}:\n{status_text}"
+            )
+            sent = True
+        except Exception as e:
+            print(f"❌ user_id: {e}")
+    
+    if not sent and order and order.get('user_username'):
+        try:
+            await context.bot.send_message(
+                chat_id=f"@{order['user_username']}",
+                text=f"📋 Статус заказа #{order_id}:\n{status_text}"
+            )
+        except Exception as e:
+            print(f"❌ username: {e}")
     
     await query.answer("✅ Статус обновлен!")
+    try:
+        await admin_order_detail(update, context)
+    except:
+        pass
 
 async def upload_work_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -417,22 +477,16 @@ async def process_pending_work(context, admin_id=None):
     if admin_id is None:
         admin_id = context.job.data.get('admin_id')
     
-    print(f"DEBUG: process_pending_work для {admin_id}")
-    
     state = get_admin_state(admin_id)
-    
-    print(f"DEBUG: uploading_work = {state.uploading_work}")
-    print(f"DEBUG: pending_photos = {len(state.pending_photos)}")
-    print(f"DEBUG: pending_message = '{state.pending_message}'")
     
     if not state.uploading_work or not state.selected_order:
         state.processing = False
-        print("DEBUG: Нет загрузки")
         return
     
     order = state.selected_order
+    print(f"DEBUG: Обработка {len(state.pending_photos)} фото")
     
-    # Загружаем фото
+    # Загружаем все фото
     for photo in state.pending_photos[:10]:
         try:
             file = await context.bot.get_file(photo.file_id)
@@ -441,7 +495,7 @@ async def process_pending_work(context, admin_id=None):
             file_url = upload_file(bytes(file_data), file_name, 'works')
             if file_url:
                 state.work_files.append(file_url)
-                print(f"✅ Фото загружено")
+                print(f"✅ Фото загружено: {file_url}")
         except Exception as e:
             print(f"❌ Фото: {e}")
     
@@ -449,11 +503,8 @@ async def process_pending_work(context, admin_id=None):
     state.pending_photos = []
     state.pending_message = ''
     
-    print(f"DEBUG: work_files = {len(state.work_files)}")
-    print(f"DEBUG: work_message = '{state.work_message}'")
-    
     if state.work_files and state.work_message:
-        print("DEBUG: Сохранение в БД")
+        # Сохраняем в БД
         supabase_update('orders', order.get('id'), {
             'status': 'ready',
             'work_files': state.work_files,
@@ -462,41 +513,52 @@ async def process_pending_work(context, admin_id=None):
         
         allow_review(order)
         
+        # Отправляем пользователю
         sent = False
         chat_id = None
         
         if order.get('user_id'):
             try:
                 chat_id = int(order['user_id'])
-                await context.bot.send_message(chat_id=chat_id, text=f"✅ Ваш заказ #{order.get('id')} готов!\n\nСообщение от Дизайнера:\n{state.work_message}")
                 sent = True
-                print(f"✅ Отправлено user_id")
             except Exception as e:
                 print(f"❌ user_id: {e}")
         
         if not sent and order.get('user_username'):
             try:
                 chat_id = f"@{order['user_username']}"
-                await context.bot.send_message(chat_id=chat_id, text=f"✅ Ваш заказ #{order.get('id')} готов!\n\nСообщение от Дизайнера:\n{state.work_message}")
                 sent = True
-                print(f"✅ Отправлено username")
             except Exception as e:
                 print(f"❌ username: {e}")
         
-        if sent and state.work_files:
-            for url in state.work_files[:10]:
-                try:
-                    await context.bot.send_photo(chat_id=chat_id, photo=url)
-                    print("✅ Фото отправлено")
-                except:
-                    pass
-        
         if sent:
             try:
+                # Отправляем текст
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"✅ Ваш заказ #{order.get('id')} готов!\n\n"
+                         f"Сообщение от Дизайнера:\n{state.work_message}"
+                )
+                
+                # Отправляем фото
+                for url in state.work_files[:10]:
+                    try:
+                        await context.bot.send_photo(chat_id=chat_id, photo=url)
+                        print(f"✅ Фото отправлено")
+                    except Exception as e:
+                        print(f"❌ Отправка фото: {e}")
+                
+                # Кнопка отзыва
                 keyboard = [[InlineKeyboardButton("⭐ Оставить отзыв", callback_data=f'review_{order.get("id")}')]]
-                await context.bot.send_message(chat_id=chat_id, text="Понравилась работа? Оставьте отзыв!", reply_markup=InlineKeyboardMarkup(keyboard))
-            except:
-                pass
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="⭐ Понравилась работа? Оставьте отзыв!",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                print("✅ Всё отправлено")
+            except Exception as e:
+                print(f"❌ Отправка: {e}")
+                sent = False
         
         state.uploading_work = False
         state.work_files = []
@@ -506,19 +568,17 @@ async def process_pending_work(context, admin_id=None):
             if sent:
                 await context.bot.send_message(chat_id=admin_id, text="✅ Работа отправлена клиенту!")
             else:
-                await context.bot.send_message(chat_id=admin_id, text="✅ Работа сохранена!")
+                await context.bot.send_message(chat_id=admin_id, text="✅ Работа сохранена! (пользователь не подписан)")
         except:
             pass
     else:
-        print("DEBUG: Недостаточно данных")
         try:
             await context.bot.send_message(
                 chat_id=admin_id,
-                text=f"❌ Фото: {len(state.work_files)}, Текст: {'✅' if state.work_message else '❌'}"
+                text=f"❌ Нужно: текст и фото\nФото: {len(state.work_files)}, Текст: {'✅' if state.work_message else '❌'}"
             )
         except:
             pass
-    
     state.processing = False
     print("DEBUG: Обработка завершена")
 
@@ -586,6 +646,7 @@ def main():
     application.add_handler(CallbackQueryHandler(my_reviews, pattern='^my_reviews$'))
     application.add_handler(CallbackQueryHandler(show_reviews, pattern='^show_reviews$'))
     application.add_handler(CallbackQueryHandler(my_orders, pattern='^my_orders$'))
+    application.add_handler(CallbackQueryHandler(my_order_detail, pattern='^my_order_'))
     application.add_handler(CallbackQueryHandler(back_to_start, pattern='^back_to_start$'))
     
     application.add_handler(MessageHandler(filters.ALL, handle_all_messages))
