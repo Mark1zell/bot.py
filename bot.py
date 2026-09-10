@@ -598,21 +598,18 @@ async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         print("DEBUG: Уже обрабатывается, добавляю фото")
         return
     
-    # Запускаем обработку через 3 секунды
+    # Запускаем обработку
     state.processing = True
-    print("DEBUG: Запуск обработки через 3 секунды")
-    
-    context.job_queue.run_once(
-        process_pending_work,
-        3,
-        data={'admin_id': user.id}
-    )
+    print("DEBUG: Запуск обработки")
     
     await update.message.reply_text(f"📸 Получено: {len(state.pending_photos)} фото")
+    
+    # Обрабатываем БЕЗ JobQueue
+    await process_pending_work(context, user.id)
 
 async def process_pending_work(context, admin_id=None):
-    if admin_id is None:
-        admin_id = context.job.data.get('admin_id')
+    # Ждем 3 секунды чтобы собрать все фото из media_group
+    await asyncio.sleep(3)
     
     state = get_admin_state(admin_id)
     
@@ -706,7 +703,7 @@ async def process_pending_work(context, admin_id=None):
             if sent:
                 await context.bot.send_message(chat_id=admin_id, text="✅ Работа отправлена клиенту!")
             else:
-                await context.bot.send_message(chat_id=admin_id, text="✅ Работа сохранена! (пользователь не подписан)")
+                await context.bot.send_message(chat_id=admin_id, text="✅ Работа сохранена!")
         except:
             pass
     else:
