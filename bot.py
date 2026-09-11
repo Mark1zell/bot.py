@@ -286,7 +286,8 @@ async def handle_successful_payment(update: Update, context: ContextTypes.DEFAUL
     supabase_update('orders', order_id, {
         'status': 'paid_stars',
         'paid_at': datetime.now().isoformat(),
-        'payment_id': charge_id
+        'payment_id': charge_id,
+        'stars_amount': amount   # ← количество звёзд
     })
 
     try:
@@ -382,7 +383,9 @@ async def my_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = f"📋 Заказ #{order.get('id', '?')}\n\n"
     text += f"🛠️ Услуга: {order.get('service', 'Нет')}\n"
     text += f"📊 Статус: {status_text}\n"
-    text += f"💰 Сумма: {order.get('total', 0)}₽\n"
+        text += f"💰 Сумма: {order.get('total', 0)}₽\n"
+    if order.get('stars_amount'):
+        text += f"⭐ Оплачено: {order.get('stars_amount')} звёзд\n"
 
     if order.get('work_message'):
         text += f"\n💬 Сообщение от дизайнера:\n{order.get('work_message')}\n"
@@ -734,7 +737,7 @@ async def process_pending_work(context, admin_id=None):
                 file = await context.bot.get_file(photo.file_id)
                 file_data = await file.download_as_bytearray()
                 file_name = f"work_{order.get('id', '0')}_{datetime.now().timestamp()}_{len(state.work_files)}.jpg"
-                file_url = upload_file(bytes(file_data), file_name, 'works')
+                file_url = await asyncio.to_thread(upload_file, bytes(file_data), file_name, 'works')
                 if file_url:
                     state.work_files.append(file_url)
                     print(f"✅ Фото {len(state.work_files)}/{photos_count} загружено")
@@ -745,9 +748,15 @@ async def process_pending_work(context, admin_id=None):
         state.pending_photos = []
         state.pending_message = ''
 
-        if state.work_files and state.work_message:
+        print(f"DEBUG: work_files={len(state.work_files)}, work_message='{state.work_message[:30] if state.work_message else None}', user_id={order.get('user_id')}, username={order.get('user_username')}")       
+
+                # Разрешаем отправку, если есть ИЛИ фото, ИЛИ текст
+        if state.work_files or state.work_message:
             supabase_update('orders', order.get('id'), {
                 'status': 'ready',
+                'work_files': state.work_files,
+                'work_message': state.work_message or ''
+            })
                 'work_files': state.work_files,
                 'work_message': state.work_message
             })
@@ -757,14 +766,13 @@ async def process_pending_work(context, admin_id=None):
             sent = False
             chat_id = None
 
-            if order.get('user_id'):
+                        if order.get('user_id'):
                 try:
                     chat_id = int(order['user_id'])
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"✅ Ваш заказ #{order.get('id')} готов!\n\n"
-                             f"Сообщение от Дизайнера:\n{state.work_message}"
-                    )
+                    text_to_send = f"✅ Ваш заказ #{order.get('id')} готов!"
+                    if state.work_message:
+                        text_to_send += f"\n\nСообщение от Дизайнера:\n{state.work_message}"
+                    await context.bot.send_message(chat_id=chat_id, text=text_to_send)
                     sent = True
                     print("✅ Текст отправлен по user_id")
                 except Exception as e:
@@ -981,6 +989,7 @@ async def publish_review(context, user, state):
                 'options': options,
                 'time': order.get('time'),
                 'completed_at': order.get('completed_at')
+                'stars_amount': order.get('stars_amount')
             }
 
     review_data = {
