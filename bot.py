@@ -164,6 +164,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.username:
         supabase_update_by_username('orders', user.username, {'user_id': str(user.id)})
 
+        # Проверяем, откуда пришёл
+    args = context.args
+    from_app = args and args[0] == 'from_app'
+
     if user.id == ADMIN_ID:
         keyboard = [
             [InlineKeyboardButton("🚀 Открыть приложение", url='https://t.me/Mark1zDesign_bot/mark1zapp')],
@@ -201,6 +205,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💬 <b>Вопросы?</b>\n"
             "Пиши дизайнеру: @mark1zell"
         )
+
+    if from_app:
+            text += "\n\n✅ Вы подписаны на уведомления от приложения!"
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     if update.message:
@@ -580,32 +587,35 @@ async def start_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_review_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
+
     try:
         stars = int(query.data.split('_')[2])
-    except:
+    except Exception:
         await query.answer("Ошибка", show_alert=True)
         return
-    
+
     user = query.from_user
     state = get_user_state(user.id)
     state.review_stars = stars
     state.review_text = ''
     state.review_images = []
     state.awaiting_review = True
-    
+    state.review_step = 'text'  # ← новый шаг
+
     print(f"⭐⭐ Пользователь {user.id} поставил {stars} звезд")
-    
-    await query.edit_message_text(
-        f"Оценка: {'⭐' * stars}\n\n"
-        f"📝 Введите текст отзыва:"
-    )
-    
-    # Уведомляем что ждём текст
+
     await context.bot.send_message(
         chat_id=user.id,
-        text="📝 Напишите текст отзыва в ответ на это сообщение:"
+        text=(
+            f"Оценка: {'⭐' * stars}\n\n"
+            "📝 Теперь напишите текст отзыва — просто отправьте его одним сообщением."
+        )
     )
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
 
 async def done_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -618,6 +628,14 @@ async def done_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not state.review_text:
         await update.message.reply_text("Сначала введите текст отзыва.")
         return
+
+    # Публикуем если ещё не опубликован
+    success = await publish_review(context, user, state)
+    if success:
+        state.awaiting_review = False
+        await update.message.reply_text("✅ Спасибо за отзыв! Ждём вас снова!")
+    else:
+        await update.message.reply_text("❌ Ошибка публикации.")
 
     order_info = None
     if state.current_order_id:
@@ -895,41 +913,104 @@ async def process_pending_work(context, admin_id=None):
 async def handle_review_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     state = get_user_state(user.id)
-    
-    print(f"DEBUG: review message от {user.id}")
-    print(f"DEBUG: awaiting_review = {state.awaiting_review}")
-    print(f"DEBUG: review_stars = {state.review_stars}")
-    print(f"DEBUG: review_text = '{state.review_text}'")
-    
+
     if not state.awaiting_review:
         return
-    
+
     text = update.message.text or update.message.caption or ''
-    
-    # Если текста еще нет - берем первое сообщение как текст
-    if not state.review_text and text and text != '/done':
+
+    # Если пришёл текст — публикуем сразу
+    if text and text != '/done' and not state.review_text:
         state.review_text = text
         print(f"✅ Текст отзыва получен: {text[:50]}")
-        await update.message.reply_text(
-            "✅ Текст получен!\n\n"
-            "📎 Добавьте фото (до 3) или отправьте /done"
-        )
+
+        # Публикуем отзыв автоматически
+        success = await publish_review(context, user, state)
+
+        if success:
+            state.awaiting_review = False
+            await update.message.reply_text(
+                "✅ <b>Спасибо за отзыв!</b>\n\n"
+                "Ждём вас снова! 🎨",
+                parse_mode='HTML'
+            )
+        else:
+            await update.message.reply_text("❌ Не удалось сохранить отзыв. Попробуйте позже.")
+            state.awaiting_review = False
         return
-    
-    # Если текст есть - обрабатываем фото
-    if update.message.photo:
+
+    # Если фото — сохраняем (опционально)
+    if update.message.photo and len(state.review_images) < 3:
         photo = update.message.photo[-1]
         try:
             file = await context.bot.get_file(photo.file_id)
             file_data = await file.download_as_bytearray()
             file_name = f"review_{user.id}_{datetime.now().timestamp()}.jpg"
             file_url = upload_file(bytes(file_data), file_name, 'reviews')
-            if file_url and len(state.review_images) < 3:
+            if file_url:
                 state.review_images.append(file_url)
-                await update.message.reply_text(f"📎 Фото: {len(state.review_images)}/3")
+                await update.message.reply_text(f"📎 Фото добавлено ({len(state.review_images)}/3)")
         except Exception as e:
             print(f"❌ Ошибка фото: {e}")
-        return
+
+
+async def publish_review(context, user, state):
+    """Публикует отзыв в Supabase."""
+    order_info = None
+    if state.current_order_id:
+        order = supabase_get_single('orders', state.current_order_id)
+        if order:
+            try:
+                options_raw = order.get('options')
+                if isinstance(options_raw, str):
+                    options = json.loads(options_raw)
+                elif isinstance(options_raw, list):
+                    options = options_raw
+                else:
+                    options = []
+            except Exception:
+                options = []
+
+            order_info = {
+                'service': order.get('service'),
+                'total': order.get('total'),
+                'options': options,
+                'time': order.get('time'),
+                'completed_at': order.get('completed_at')
+            }
+
+    review_data = {
+        'author_name': user.first_name or user.username or 'Пользователь',
+        'author_username': user.username or '',
+        'author_id': str(user.id),
+        'stars': state.review_stars,
+        'text': state.review_text,
+        'images': state.review_images,
+        'order_info': order_info,
+        'likes_heart': 0,
+        'likes_fire': 0,
+        'likes_plus': 0,
+        'admin_reply': '',
+        'timestamp': datetime.now().isoformat()
+    }
+
+    try:
+        result = supabase_insert('reviews', review_data)
+    except Exception as e:
+        print(f"❌ Ошибка insert отзыва: {e}")
+        return False
+
+    if not result:
+        return False
+
+    # Сбрасываем can_review
+    user_identifier = user.username or user.first_name or str(user.id)
+    try:
+        supabase_update_by_username('user_last_review', user_identifier, {'can_review': False})
+    except Exception as e:
+        print(f"⚠️ Не удалось сбросить can_review: {e}")
+
+    return True
 
 async def back_to_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
