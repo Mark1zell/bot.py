@@ -165,7 +165,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user.id == ADMIN_ID:
         keyboard = [
-            [InlineKeyboardButton("🚀 Открыть приложение", url='https://t.me/Mark1zDesign_bot/app')],
+            [InlineKeyboardButton("🚀 Открыть приложение", url='https://t.me/Mark1zDesign_bot/mark1zapp')],
             [InlineKeyboardButton("📋 Все заказы", callback_data='admin_all_orders')],
             [InlineKeyboardButton("🔴 Не начатые", callback_data='admin_not_started')],
             [InlineKeyboardButton("👥 Пользователи", callback_data='admin_users')],
@@ -184,7 +184,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         keyboard = [
-            [InlineKeyboardButton("🚀 Открыть приложение", url='https://t.me/Mark1zDesign_bot/app')],
+            [InlineKeyboardButton("🚀 Открыть приложение", url='https://t.me/Mark1zDesign_bot/mark1zapp')],
             [InlineKeyboardButton("📋 Мои заказы", callback_data='my_orders')],
             [InlineKeyboardButton("⭐ Отзывы", callback_data='show_reviews')],
             [InlineKeyboardButton("📝 Мои отзывы", callback_data='my_reviews')],
