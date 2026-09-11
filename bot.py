@@ -73,6 +73,22 @@ def supabase_insert(table, data):
         print(f"ERROR: {e}")
         return None
 
+def supabase_upsert(table, data, on_conflict='user_id'):
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/{table}?on_conflict={on_conflict}"
+        headers = {
+            'apikey': SUPABASE_KEY,
+            'Authorization': f'Bearer {SUPABASE_KEY}',
+            'Content-Type': 'application/json',
+            'Prefer': 'resolution=merge-duplicates,return=representation'
+        }
+        response = requests.post(url, headers=headers, json=data, timeout=15)
+        result = response.json()
+        return result[0] if result else None
+    except Exception as e:
+        print(f"ERROR: {e}")
+        return None
+
 
 def supabase_update(table, id, data):
     try:
@@ -207,6 +223,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.username:
         supabase_update_by_username('orders', user.username, {'user_id': str(user.id)})
 
+    # Записываем юзера в users_bot (чтобы фронт знал, что он подписан)
+    supabase_upsert('users_bot', {
+        'user_id': str(user.id),
+        'username': user.username or '',
+        'first_name': user.first_name or ''
+    })
+
     args = context.args
     from_app = args and args[0] == 'from_app'
 
@@ -256,7 +279,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
     else:
         await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
-
 
 # ================================================================
 # TELEGRAM STARS
@@ -888,14 +910,32 @@ async def set_review_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     print(f"⭐⭐ Пользователь {user.id} поставил {stars} звезд")
 
-    await context.bot.send_message(
-        chat_id=user.id,
-        text=(
-            f"Оценка: {'⭐' * stars}\n\n"
-            "📝 Теперь напишите текст отзыва — просто отправьте его одним сообщением."
+    # Пытаемся отправить сообщение с просьбой написать текст
+    sent = False
+    try:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                f"Оценка: {'⭐' * stars}\n\n"
+                "📝 Теперь напишите текст отзыва — просто отправьте его следующим сообщением."
+            )
         )
-    )
+        sent = True
+        print(f"✅ Просьба написать текст отправлена юзеру {user.id}")
+    except Exception as e:
+        print(f"❌ Не удалось отправить сообщение: {e}")
 
+    # Если не удалось — правим исходное сообщение
+    if not sent:
+        try:
+            await query.edit_message_text(
+                f"Оценка: {'⭐' * stars}\n\n"
+                "⚠️ Чтобы продолжить, нажмите /start в боте, затем снова выберите оценку."
+            )
+        except Exception:
+            pass
+
+    # Удаляем кнопки со звёздами
     try:
         await query.message.delete()
     except Exception:
@@ -934,6 +974,9 @@ async def handle_review_message(update: Update, context: ContextTypes.DEFAULT_TY
 
     text = update.message.text or update.message.caption or ''
 
+    print(f"DEBUG: handle_review_message от {user.id}, text='{text[:50]}', awaiting={state.awaiting_review}")
+
+    # Если пришёл текст — публикуем
     if text and not state.review_text:
         state.review_text = text
         print(f"✅ Текст отзыва получен: {text[:50]}")
@@ -942,6 +985,9 @@ async def handle_review_message(update: Update, context: ContextTypes.DEFAULT_TY
 
         if success:
             state.awaiting_review = False
+            state.review_stars = 0
+            state.review_text = ''
+            state.review_images = []
             await update.message.reply_text(
                 "✅ <b>Спасибо за отзыв!</b>\n\n"
                 "Ждём вас снова! 🎨",
@@ -952,6 +998,7 @@ async def handle_review_message(update: Update, context: ContextTypes.DEFAULT_TY
             state.awaiting_review = False
         return
 
+    # Если фото — сохраняем
     if update.message.photo and len(state.review_images) < 3:
         photo = update.message.photo[-1]
         try:
@@ -1057,10 +1104,12 @@ async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE
     state = get_user_state(user.id)
     admin_state = get_admin_state(user.id)
 
+    # Админ загружает работу
     if user.id == ADMIN_ID and admin_state.uploading_work:
         await handle_admin_upload(update, context)
         return
 
+    # Юзер пишет отзыв
     if state.awaiting_review:
         await handle_review_message(update, context)
         return
