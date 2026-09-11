@@ -127,6 +127,7 @@ STATUS_EMOJI = {
 
 user_states = {}
 admin_states = {}
+debounce_tasks = {}
 
 class UserState:
     def __init__(self):
@@ -629,6 +630,8 @@ async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # Глобальный словарь для отслеживания media_group
 media_group_tracker = {}
+# Дебаунс-таски для сбора альбомов фото
+debounce_tasks = {}
 
 async def handle_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
