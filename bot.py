@@ -7,6 +7,7 @@ import asyncio
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import PreCheckoutQueryHandler
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -214,6 +215,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
     else:
         await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+
+async def handle_pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Telegram требует ответить в течение 10 секунд."""
+    query = update.pre_checkout_query
+    print(f"💫 PreCheckout: {query.invoice_payload}, {query.total_amount}⭐")
+
+    # Всегда подтверждаем — можно добавить проверку payload
+    await query.answer(ok=True)
+
+
+async def handle_successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Клиент оплатил звёздами."""
+    payment = update.message.successful_payment
+    payload = payment.invoice_payload  # "order_123"
+    amount = payment.total_amount      # количество звёзд
+    charge_id = payment.telegram_payment_charge_id
+
+    print(f"✅ Оплата звёздами: {payload}, {amount}⭐, charge_id={charge_id}")
+
+    # Достаём order_id из payload
+    try:
+        order_id = int(payload.replace('order_', ''))
+    except Exception:
+        print(f"⚠️ Не удалось распарсить order_id из payload: {payload}")
+        return
+
+    # Обновляем заказ
+    supabase_update('orders', order_id, {
+        'status': 'paid_stars',
+        'paid_at': datetime.now().isoformat(),
+        'payment_id': charge_id
+    })
+
+    # Пишем клиенту
+    try:
+        await update.message.reply_text(
+            f"✅ Оплата прошла! Заказ #{order_id} оплачен {amount} звёздами.\n"
+            f"Дизайнер скоро приступит к работе."
+        )
+    except Exception as e:
+        print(f"❌ Не удалось отправить сообщение: {e}")
 
 async def show_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1056,7 +1098,10 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler('start', start))
+    # Telegram Stars: подтверждение пред-оплаты
+    application.add_handler(PreCheckoutQueryHandler(handle_pre_checkout))
+    # Telegram Stars: успешная оплата
+    application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, handle_successful_payment))
     application.add_handler(CommandHandler('help', show_help))
     application.add_handler(CommandHandler('done', done_review))
     application.add_handler(CallbackQueryHandler(change_status, pattern='^status_'))
