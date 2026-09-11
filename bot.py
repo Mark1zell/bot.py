@@ -308,15 +308,46 @@ async def admin_all_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     if query.from_user.id != ADMIN_ID:
         return
-    orders = supabase_get('orders', {'order': 'timestamp.desc', 'limit': '20'})
+    orders = supabase_get('orders', {'order': 'timestamp.desc', 'limit': '30'})
     if not orders:
         await query.edit_message_text("Нет заказов.")
         return
+
+    # Группируем по статусу
+    not_started = [o for o in orders if o.get('status') in ('paid_card', 'paid_stars', 'not_started', 'pending_payment')]
+    in_progress = [o for o in orders if o.get('status') == 'in_progress']
+    ready = [o for o in orders if o.get('status') == 'ready']
+    other = [o for o in orders if o not in not_started + in_progress + ready]
+
     keyboard = []
-    for order in orders:
-        keyboard.append([InlineKeyboardButton(f"#{order.get('id', '?')} - {order.get('service', 'Нет')}", callback_data=f"admin_order_{order.get('id')}")])
+    if not_started:
+        keyboard.append([InlineKeyboardButton(f"── 🔴 Не начатые ({len(not_started)}) ──", callback_data='noop')])
+        for order in not_started[:10]:
+            keyboard.append([InlineKeyboardButton(
+                f"🔴 #{order.get('id')} · {order.get('service', 'Нет')} · {order.get('total', 0)}₽",
+                callback_data=f"admin_order_{order.get('id')}"
+            )])
+    if in_progress:
+        keyboard.append([InlineKeyboardButton(f"── 🟡 В работе ({len(in_progress)}) ──", callback_data='noop')])
+        for order in in_progress[:10]:
+            keyboard.append([InlineKeyboardButton(
+                f"🟡 #{order.get('id')} · {order.get('service', 'Нет')} · {order.get('total', 0)}₽",
+                callback_data=f"admin_order_{order.get('id')}"
+            )])
+    if ready:
+        keyboard.append([InlineKeyboardButton(f"── ✅ Готовые ({len(ready)}) ──", callback_data='noop')])
+        for order in ready[:5]:
+            keyboard.append([InlineKeyboardButton(
+                f"✅ #{order.get('id')} · {order.get('service', 'Нет')}",
+                callback_data=f"admin_order_{order.get('id')}"
+            )])
+
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')])
-    await query.edit_message_text("Все заказы:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(
+        "📋 <b>Все заказы</b>\n\n🔴 — не начатые\n🟡 — в работе\n✅ — готовые",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
 
 async def admin_not_started(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -324,17 +355,20 @@ async def admin_not_started(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.from_user.id != ADMIN_ID:
         return
     orders = supabase_get('orders', {
-        'or': '(status.eq.not_started,status.eq.paid_card,status.eq.in)',
+        'or': '(status.eq.not_started,status.eq.paid_card,status.eq.paid_stars)',
         'order': 'timestamp.desc'
     })
     if not orders:
-        await query.edit_message_text("Нет не начатых заказов.")
+        await query.edit_message_text("🔴 Нет не начатых заказов.")
         return
     keyboard = []
     for order in orders:
-        keyboard.append([InlineKeyboardButton(f"#{order.get('id', '?')} - {order.get('service', 'Нет')}", callback_data=f"admin_order_{order.get('id')}")])
+        keyboard.append([InlineKeyboardButton(
+            f"🔴 #{order.get('id')} · {order.get('service', 'Нет')} · {order.get('total', 0)}₽",
+            callback_data=f"admin_order_{order.get('id')}"
+        )])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')])
-    await query.edit_message_text("🔴 Не начатые заказы:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text("🔴 <b>Не начатые заказы:</b>", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
 
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -386,28 +420,65 @@ async def admin_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not order:
         await query.edit_message_text("Заказ не найден.")
         return
-    
+
     state = get_admin_state(query.from_user.id)
     state.selected_order = order
-    
+
     raw_status = order.get('status', 'unknown')
     status_text = STATUS_NAMES.get(raw_status, f'⚪ {raw_status}')
-    
-    text = f"📋 Заказ #{order.get('id', '?')}\n\n"
-    text += f"🛠️ Услуга: {order.get('service', 'Нет')}\n"
-    text += f"👤 Клиент: @{order.get('user_username', 'нет')}\n"
-    text += f"💰 Сумма: {order.get('total', 0)}₽\n"
-    text += f"📊 Статус: {status_text}\n\n"
-    
+    status_emoji = STATUS_EMOJI.get(raw_status, '⚪')
+
+    text = f"{status_emoji} <b>Заказ #{order.get('id', '?')}</b>\n\n"
+    text += f"🛠 Услуга: <b>{order.get('service', 'Нет')}</b>\n"
+    text += f"👤 Клиент: {order.get('user_name', 'нет')}"
+    if order.get('user_username'):
+        text += f" (@{order.get('user_username')})"
+    text += f"\n💰 Сумма: {order.get('total', 0)}₽\n"
+    text += f"📅 Время: {order.get('time', '—')}\n"
+    text += f"📊 Статус: {status_text}\n"
+
     if order.get('description'):
-        text += f"📝 ТЗ: {order.get('description')}\n"
-    
-    keyboard = [
-        [InlineKeyboardButton("🟡 Готовится", callback_data=f'status_{order_id}_in_progress')],
-        [InlineKeyboardButton("🟢 Готов (загрузить работы)", callback_data=f'upload_work_{order_id}')],
-        [InlineKeyboardButton("🔙 Назад", callback_data='admin_users')],
-    ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        text += f"\n📝 <b>ТЗ клиента:</b>\n{order.get('description')}\n"
+
+    # Опции
+    try:
+        options = json.loads(order.get('options', '[]')) if isinstance(order.get('options'), str) else (order.get('options') or [])
+    except Exception:
+        options = []
+    if options:
+        text += "\n📦 <b>Опции:</b>\n"
+        for o in options:
+            text += f" • {o.get('name')} ×{o.get('quantity', 1)} — {o.get('total', o.get('price', 0))}₽\n"
+
+    # Кнопки статусов
+    keyboard = []
+    if raw_status not in ('in_progress',):
+        keyboard.append([InlineKeyboardButton("🟡 Готовится", callback_data=f'status_{order_id}_in_progress')])
+    if raw_status != 'ready':
+        keyboard.append([InlineKeyboardButton("🟢 Готов (загрузить работы)", callback_data=f'upload_work_{order_id}')])
+    if raw_status != 'not_started':
+        keyboard.append([InlineKeyboardButton("🔴 Вернуть в не начатые", callback_data=f'status_{order_id}_not_started')])
+
+    # Кнопка связаться с клиентом
+    if order.get('user_username'):
+        keyboard.append([InlineKeyboardButton("💬 Написать клиенту", url=f"https://t.me/{order.get('user_username')}")])
+
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='admin_all_orders')])
+
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+    # Отправляем референсы отдельными сообщениями
+    refs = order.get('reference_urls') or []
+    if isinstance(refs, str):
+        try:
+            refs = json.loads(refs)
+        except Exception:
+            refs = []
+    for url in refs[:5]:
+        try:
+            await context.bot.send_photo(chat_id=query.from_user.id, photo=url, caption="📎 Референс клиента")
+        except Exception as e:
+            print(f"Ошибка отправки референса: {e}")
 
 async def change_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -921,6 +992,7 @@ def main():
     application.add_handler(CallbackQueryHandler(my_reviews, pattern='^my_reviews$'))
     application.add_handler(CallbackQueryHandler(my_orders, pattern='^my_orders$'))
     application.add_handler(CallbackQueryHandler(show_help, pattern='^show_help$'))
+    application.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern='^noop$'))
     application.add_handler(CallbackQueryHandler(back_to_start, pattern='^back_to_start$'))
     
     application.add_handler(MessageHandler(filters.ALL, handle_all_messages))
