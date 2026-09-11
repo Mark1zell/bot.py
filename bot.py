@@ -159,31 +159,53 @@ def get_admin_state(user_id):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     print(f"DEBUG: /start от {user.id} (@{user.username})")
-    
+
     if user.username:
         supabase_update_by_username('orders', user.username, {'user_id': str(user.id)})
-    
+
     if user.id == ADMIN_ID:
         keyboard = [
-            [InlineKeyboardButton("👥 Пользователи", callback_data='admin_users')],
+            [InlineKeyboardButton("🚀 Открыть приложение", url='https://t.me/Mark1zDesign_bot/app')],
             [InlineKeyboardButton("📋 Все заказы", callback_data='admin_all_orders')],
-            [InlineKeyboardButton("⭐ Отзывы", callback_data='show_reviews')],
             [InlineKeyboardButton("🔴 Не начатые", callback_data='admin_not_started')],
+            [InlineKeyboardButton("👥 Пользователи", callback_data='admin_users')],
+            [InlineKeyboardButton("⭐ Отзывы", callback_data='show_reviews')],
+            [InlineKeyboardButton("ℹ️ Помощь", callback_data='show_help')],
         ]
-        text = "👑 Админ-панель:"
+        text = (
+            "👑 <b>Админ-панель Mark1z Design</b>\n\n"
+            "Управляйте заказами и клиентами прямо здесь.\n\n"
+            "• <b>Все заказы</b> — полный список\n"
+            "• <b>Не начатые</b> — те, что ждут старта\n"
+            "• <b>Пользователи</b> — список клиентов\n"
+            "• <b>Отзывы</b> — что пишут клиенты\n\n"
+            "Заказы можно менять: «Готовится» → «Готов».\n"
+            "Когда нажмёте «Готов», бот попросит прислать фото работ."
+        )
     else:
         keyboard = [
+            [InlineKeyboardButton("🚀 Открыть приложение", url='https://t.me/Mark1zDesign_bot/app')],
             [InlineKeyboardButton("📋 Мои заказы", callback_data='my_orders')],
             [InlineKeyboardButton("⭐ Отзывы", callback_data='show_reviews')],
             [InlineKeyboardButton("📝 Мои отзывы", callback_data='my_reviews')],
+            [InlineKeyboardButton("ℹ️ Помощь", callback_data='show_help')],
         ]
-        text = f"👋 Привет, {user.first_name}!\n\nВы подписаны на уведомления!"
-    
+        text = (
+            f"👋 <b>Привет, {user.first_name}!</b>\n\n"
+            "Я бот <b>Mark1z Design</b> — помогаю следить за заказами.\n\n"
+            "🛠 <b>Как оформить заказ?</b>\n"
+            "Открой приложение и выбери услугу или товар.\n\n"
+            "📋 <b>Как следить за статусом?</b>\n"
+            "Нажми «Мои заказы» — там всё видно.\n\n"
+            "💬 <b>Вопросы?</b>\n"
+            "Пиши дизайнеру: @mark1zell"
+        )
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     if update.message:
-        await update.message.reply_text(text, reply_markup=reply_markup)
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
     else:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
 
 async def show_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -265,8 +287,11 @@ async def my_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if order.get('work_message'):
         text += f"\n💬 Сообщение от дизайнера:\n{order.get('work_message')}\n"
     
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='my_orders')]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        keyboard = [
+        [InlineKeyboardButton("💬 Связаться с дизайнером", url='https://t.me/mark1zell')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='my_orders')]
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
     
     # Отправляем фото работ
     work_files = order.get('work_files', [])
@@ -837,10 +862,47 @@ async def back_to_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     await start(update, context)
 
+async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await query.answer()
+        user_id = query.from_user.id
+        send = query.edit_message_text
+    else:
+        user_id = update.effective_user.id
+        send = update.message.reply_text
+
+    if user_id == ADMIN_ID:
+        text = (
+            "👑 <b>Как работать админу</b>\n\n"
+            "1. <b>Все заказы</b> — открыть список\n"
+            "2. Выбрать заказ → «Готовится» или «Готов»\n"
+            "3. При «Готов» бот попросит фото (до 10) + текст\n"
+            "4. Отправить фото альбомом и текст одним сообщением\n"
+            "5. Клиент получит уведомление\n\n"
+            "❓ Если фото не отправляются — попробуй ещё раз, "
+            "иногда Telegram теряет часть альбома."
+        )
+    else:
+        text = (
+            "ℹ️ <b>Помощь</b>\n\n"
+            "📋 <b>Мои заказы</b> — все ваши заказы\n"
+            "⭐ <b>Отзывы</b> — что пишут другие\n"
+            "📝 <b>Мои отзывы</b> — ваши отзывы\n\n"
+            "💡 <b>Совет:</b> когда дизайнер закончит работу, "
+            "вам придёт уведомление и кнопка «Оставить отзыв».\n\n"
+            "💬 <b>Связаться с дизайнером:</b> @mark1zell"
+        )
+
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='back_to_start')]]
+    await send(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+
 def main():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
-    
+
     application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('help', show_help))
     application.add_handler(CommandHandler('done', done_review))
     application.add_handler(CallbackQueryHandler(change_status, pattern='^status_'))
     application.add_handler(CallbackQueryHandler(upload_work_prompt, pattern='^upload_work_'))
@@ -855,6 +917,7 @@ def main():
     application.add_handler(CallbackQueryHandler(show_reviews, pattern='^show_reviews$'))
     application.add_handler(CallbackQueryHandler(my_reviews, pattern='^my_reviews$'))
     application.add_handler(CallbackQueryHandler(my_orders, pattern='^my_orders$'))
+    application.add_handler(CallbackQueryHandler(show_help, pattern='^show_help$'))
     application.add_handler(CallbackQueryHandler(back_to_start, pattern='^back_to_start$'))
     
     application.add_handler(MessageHandler(filters.ALL, handle_all_messages))
